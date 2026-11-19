@@ -4,6 +4,7 @@
 负责初始化和协调各模块运行
 """
 
+import config
 from utils import configure_encoding
 import paths  # 导入模块而非具体变量，以便动态获取更新后的值
 from cli import run_cli
@@ -13,6 +14,8 @@ def main():
     """主函数：初始化并启动CLI交互界面"""
     # 配置编码
     configure_encoding()
+    # 应用 settings.json 覆盖（必须在 set_total_path 之前）
+    config.apply_settings()
     # 设置下载目录
     paths.set_total_path()
     # 打印信息

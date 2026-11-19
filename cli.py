@@ -9,7 +9,7 @@ import os
 
 from utils import read_txt, read_int, rm_dir, write_list_txt
 import paths  # 导入模块而非具体变量，以便动态获取更新后的值
-from downloader import download
+from downloader import download, print_failure_summary
 
 
 def delete_blogger(blogger_list):
@@ -35,14 +35,34 @@ def show_blogger_list(blogger_list):
         print(str(int(i + 1)) + '：' + blogger_list[i])
 
 
+def _cli_progress(event):
+    """把下载回调渲染成终端输出，保持原有观感"""
+    stage = event.get('stage')
+    if stage == 'start':
+        print('*' * 20 + ' <blogger：' + event['blogger'] + '> ' + '*' * 20)
+        print(' <{}>视频抖音{}条，图片抖音{}条'.format(
+            event['blogger'], event['video_total'], event['picture_total']))
+    elif stage == 'file_start':
+        print('\r [{}已下载进度：{}%({}/{})] 开始下载<{}>时刻第{}{}{}'.format(
+            event['media_type'], event['percent'], event['done'], event['total'],
+            event['create_time'], event['index'], event['unit'], event['media_type']), end='')
+    elif stage == 'item':
+        print('\r [{}已下载进度：{}%({}/{})]'.format(
+            event['media_type'], event['percent'], event['done'], event['total']), end='')
+    elif stage == 'finished':
+        print('\r 下载任务结束，共处理 {}/{} 项{}'.format(
+            event['done'], event['total'], '（已取消）' if event.get('stopped') else ' ' * 30))
+        print_failure_summary()
+        print('*' * 45 + '\n')
+
+
 def run_cli():
     """运行交互式命令行循环"""
     while True:
         function_selection = input('\n  a:下载 b:删除blog c:获取blogger列表 x:退出程序 \n请输入对应的指令：').strip().lower()
         blogger_list = read_txt(paths.aweme_list_dir)
         if function_selection == 'a':
-            # blogger_response = input('blogger response:')
-            download()
+            download(progress=_cli_progress)
         elif function_selection == 'b':
             delete_blogger(blogger_list)
         elif function_selection == 'c':

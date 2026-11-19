@@ -2,6 +2,10 @@
 """
 下载与格式转换模块
 包含网络下载、去重比对、webp转jpg等功能
+
+设计说明：
+    下载过程通过 progress 回调上报事件，CLI 与 Web 各自实现回调；
+    不传 progress 时退化为原来的终端打印行为。
 """
 
 import os
@@ -11,7 +15,7 @@ import shutil
 from urllib import request
 
 from config import HEADER, SSL_CONTEXT, DOWNLOAD_TIMEOUT, MAX_RETRY
-from utils import read_txt, write_txt, make_dir, append_list_txt
+from utils import read_txt, make_dir, append_list_txt
 import paths  # 导入模块而非具体变量，以便动态获取更新后的值
 
 
@@ -89,17 +93,35 @@ def convert_webp_to_jpg(file_name):
         return False
 
 
-def download_by_type(all_url_dict, media_type):
-    """根据类型下载dict中所有的url"""
+def _notify(progress, **event):
+    """安全地上报进度事件"""
+    if progress:
+        try:
+            progress(event)
+        except Exception:
+            # 界面层的异常不应中断下载
+            pass
+
+
+def download_by_type(all_url_dict, media_type, progress=None, should_stop=None):
+    """
+    根据类型下载dict中所有的url
+
+    Args:
+        all_url_dict: 时间 -> url 列表
+        media_type: '视频' 或 '图片'
+        progress: 进度回调，接收 dict 事件
+        should_stop: 返回 True 时在当前 URL 边界停止
+    """
     global _download_failures
     # 从 paths 模块动态获取最新值
     blogger_url_txt_dir = paths.blogger_url_txt_dir
     blogger_dir = paths.blogger_dir
-    
+
     saved_url_list = read_txt(blogger_url_txt_dir)
     all_mblog_num = len(all_url_dict)
     if not all_mblog_num:
-        return
+        return False
 
     if media_type == '图片':
         picture_dir = os.path.join(blogger_dir, 'picture')
@@ -117,29 +139,45 @@ def download_by_type(all_url_dict, media_type):
 
     # 记录本次新下载成功的URL（延迟写入）
     new_downloaded_urls = []
-    
+
     download_mblog_num = 0
+    stopped = False
     for creat_time, url_mblog in all_url_dict.items():
+        if should_stop and should_stop():
+            stopped = True
+            break
         for index in range(0, len(url_mblog)):
+            if should_stop and should_stop():
+                stopped = True
+                break
             url = url_mblog[index]
             # 视频用"条"，图片用"张"
             unit = '条' if media_type == '视频' else '张'
-            print('\r [{}已下载进度：{}%({}/{})] 开始下载<{}>时刻第{}{}{}'.format(
-                media_type, int(download_mblog_num / all_mblog_num * 100), download_mblog_num,
-                all_mblog_num, creat_time, index + 1, unit, media_type), end='')
 
             # 提取当前URL的特征码
             url_signature = get_url_signature(url, start_tag, end_tag)
-            
-            if url_signature in saved_signature_set:
-                continue
 
             if media_type == '图片':
                 file_name = os.path.join(picture_dir, '{} - {}{}'.format(creat_time, index + 1, ext))
             else:
                 file_name = os.path.join(blogger_dir, '{}{}'.format(creat_time, ext))
 
-            if save_single_url(url, file_name):
+            if url_signature in saved_signature_set:
+                _notify(progress, stage='item', media_type=media_type,
+                        file=os.path.basename(file_name), url=url,
+                        index=index + 1, count=len(url_mblog),
+                        group_done=download_mblog_num, group_total=all_mblog_num,
+                        create_time=creat_time, unit=unit, skipped=True, ok=True)
+                continue
+
+            _notify(progress, stage='file_start', media_type=media_type,
+                    file=os.path.basename(file_name), url=url,
+                    index=index + 1, count=len(url_mblog),
+                    group_done=download_mblog_num, group_total=all_mblog_num,
+                    create_time=creat_time, unit=unit, skipped=False)
+
+            ok = save_single_url(url, file_name)
+            if ok:
                 # 添加到特征码集合（用于本次运行时的去重）
                 saved_signature_set.add(url_signature)
                 # 延迟写入：只保存特征码
@@ -153,17 +191,18 @@ def download_by_type(all_url_dict, media_type):
                             'error': 'webp 转 jpg 失败'
                         })
 
+            _notify(progress, stage='item', media_type=media_type,
+                    file=os.path.basename(file_name), url=url,
+                    index=index + 1, count=len(url_mblog),
+                    group_done=download_mblog_num, group_total=all_mblog_num,
+                    create_time=creat_time, unit=unit, skipped=False, ok=ok)
+
         download_mblog_num += 1
-        print('\r [{}已下载进度：{}%({}/{})]'.format(media_type, int(download_mblog_num / all_mblog_num * 100),
-                                                    download_mblog_num, all_mblog_num), end='')
-    # 清除行尾残留的"开始下载..."字符，打印简洁的完成信息
-    print('\r [{}已下载进度：{}%({}/{})] 下载完成{}'.format(
-        media_type, int(download_mblog_num / all_mblog_num * 100),
-        download_mblog_num, all_mblog_num, ' ' * 50))
-    
+
     # 所有URL下载完成后，统一批量追加写入文件
     if new_downloaded_urls:
         append_list_txt(blogger_url_txt_dir, new_downloaded_urls)
+    return stopped
 
 
 def get_failure_list():
@@ -181,7 +220,7 @@ def print_failure_summary():
     """打印下载失败汇总"""
     if not _download_failures:
         return
-    
+
     print('\n' + '=' * 60)
     print('下载失败列表（共 {} 个）：'.format(len(_download_failures)))
     print('=' * 60)
@@ -193,28 +232,64 @@ def print_failure_summary():
     print('\n' + '=' * 60)
 
 
-def download():
-    """下载协调函数：解析URL并执行下载"""
-    global _download_failures
-    from url_parser import get_all_url  # 延迟导入，避免循环依赖
-    
-    # 清空上次的失败记录
+def download(blogger_name=None, progress=None, should_stop=None, raw_lines=None):
+    """
+    下载协调函数：解析URL并执行下载
+
+    Args:
+        blogger_name: 已确认的博主名；为 None 时走 CLI 交互流程
+        progress: 进度回调，接收 dict 事件
+        should_stop: 取消检查函数
+        raw_lines: 已导入的接口数据行；为 None 时读 json.log（CLI 行为不变）
+    """
     clear_failures()
-    
-    blogger_name, all_picture_dict, all_video_dict = get_all_url()
+    from url_parser import get_all_url, parse_aweme  # 延迟导入，避免循环依赖
+
+    if blogger_name is None:
+        blogger_name, all_picture_dict, all_video_dict = get_all_url()
+    else:
+        if raw_lines is None:
+            raw_lines = read_txt(paths.get_json_log_path())
+        _, all_picture_dict, all_video_dict, _ = parse_aweme(raw_lines)
     if not blogger_name:
         return
+
     from paths import set_sub_path
     set_sub_path(blogger_name)
-    print('*' * 20 + ' <blogger：' + blogger_name + '> ' + '*' * 20)
-    print(' <{}>视频抖音{}条，图片抖音{}条'.format(blogger_name, len(all_video_dict), len(all_picture_dict)))
 
-    # 下载视频
-    download_by_type(all_video_dict, '视频')
-    # 下载图片
-    download_by_type(all_picture_dict, '图片')
-    
-    # 打印失败汇总
-    print_failure_summary()
+    # 抖音条数（按发布时间分组）与待下载文件数（每条可能有多个 URL）分开统计
+    video_total = len(all_video_dict)
+    picture_total = len(all_picture_dict)
+    video_items = sum(len(urls) for urls in all_video_dict.values())
+    picture_items = sum(len(urls) for urls in all_picture_dict.values())
+    total = video_items + picture_items
+    state = {'done': 0}
 
-    print('*' * 45 + '\n')
+    def relay(event):
+        """把分组进度折算成总进度后上抛"""
+        if event.get('stage') == 'item' and not event.get('skipped'):
+            state['done'] += 1
+        event['done'] = state['done']
+        event['total'] = total
+        event['percent'] = int(state['done'] / total * 100) if total else 100
+        _notify(progress, **event)
+
+    _notify(progress, stage='start', blogger=blogger_name,
+            video_total=video_total, picture_total=picture_total,
+            video_items=video_items, picture_items=picture_items,
+            done=0, total=total, percent=0)
+
+    download_by_type(all_video_dict, '视频', relay, should_stop)
+    download_by_type(all_picture_dict, '图片', relay, should_stop)
+
+    stopped = bool(should_stop and should_stop())
+    percent = int(state['done'] / total * 100) if total else 100
+    _notify(progress, stage='finished', blogger=blogger_name,
+            done=state['done'], total=total, percent=percent,
+            failures=get_failure_list(), stopped=stopped)
+
+    if not progress:
+        print('\n <{}>下载结束，已处理 {}/{} 项{}'.format(
+            blogger_name, state['done'], total, '（已取消）' if stopped else ''))
+        print_failure_summary()
+        print('*' * 45 + '\n')
