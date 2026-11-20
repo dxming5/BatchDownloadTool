@@ -17,10 +17,6 @@
         <p class="sub">本地运行 · 数据不出本机</p>
       </div>
     </div>
-    <div class="topbar-right">
-      <button id="dirBtn" class="pill" title="点击修改下载目录">下载目录加载中…</button>
-      <button id="settingsBtn" class="ghost">设置</button>
-    </div>
   </header>
 
   <main>
@@ -36,19 +32,12 @@
         </div>
         <p class="hint">
           打开抖音网页版 → 博主主页 → F12 → Network → 找到含 <code>aweme_list</code> 的 fetch/xhr 请求，
-          把每页 Response 一行一条粘贴到下面。数据只保存在内存（上限 100 MB），重启服务后需重新导入。
+          把每页 Response 一行一条粘贴到下面，点「开始下载」即导入数据并下载全部博主（上限 100 MB）。
         </p>
         <textarea id="jsonText" spellcheck="false" placeholder='{"aweme_list": [ ... ]}'></textarea>
         <div class="row">
-          <button id="parseBtn" class="primary">开始下载</button>
+          <button id="downloadBtn" class="primary">开始下载</button>
           <button id="clearLogBtn" class="ghost danger">清空数据</button>
-        </div>
-        <div id="bloggerBox" class="hidden">
-          <div id="bloggerChoices" class="choices"></div>
-          <div class="row">
-            <input id="nameInput" placeholder="博主名称（可修改，作为文件夹名）">
-            <button id="downloadBtn" class="primary">开始下载</button>
-          </div>
         </div>
 
         <div class="divider"></div>
@@ -85,25 +74,6 @@
       </section>
     </div>
   </main>
-
-  <div id="settingsModal" class="modal hidden">
-    <div class="modal-body">
-      <h3>设置</h3>
-      <label class="field">
-        <span>下载目录</span>
-        <input id="setDir" placeholder="例如 F:/图片/douyin/">
-      </label>
-      <label class="field">
-        <span>User-Agent</span>
-        <input id="setUA" placeholder="浏览器 User-Agent">
-      </label>
-      <p class="hint">保存后写入 settings.json，重启后仍然生效；下载目录会立即切换。</p>
-      <div class="row end">
-        <button id="settingsCancel" class="ghost">取消</button>
-        <button id="settingsSave" class="primary">保存</button>
-      </div>
-    </div>
-  </div>
 
   <div id="lightbox" class="lightbox hidden">
     <button id="lbClose" class="lb-btn lb-close" title="关闭（Esc）">✕</button>

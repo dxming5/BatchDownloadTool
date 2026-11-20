@@ -137,8 +137,7 @@ def _run_task(task, raw_lines):
     global _ACTIVE
     try:
         paths.set_total_path()
-        downloader.download(blogger_name=task.blogger,
-                            progress=task.push,
+        downloader.download(progress=task.push,
                             should_stop=task.stop_flag.is_set,
                             raw_lines=raw_lines)
         if task.stop_flag.is_set():
@@ -245,15 +244,9 @@ def create_app():
         with _LOCK:
             active = _ACTIVE.snapshot() if _ACTIVE and _ACTIVE.is_running() else None
         return jsonify({
-            'download_dir': paths.get_download_dir(),
             'json_log': _json_log_info(),
             'blogger_count': len(read_txt(paths.aweme_list_dir)),
             'active_task': active,
-            'settings': {
-                'download_dir': config.CONFIGURED_DOWNLOAD_DIR,
-                'user_agent': config.HEADER.get('User-Agent', ''),
-                'port': config.PORT,
-            },
         })
 
     # ---------------- 导入数据（内存） ----------------
@@ -315,17 +308,17 @@ def create_app():
             data = list(_JSON_LINES)
         if not data:
             return jsonify({'error': '还没有导入数据，请先粘贴接口 JSON'}), 400
-        names, pictures, videos, stats = parse_aweme(data)
-        if not names:
+        bloggers, stats = parse_aweme(data)
+        if not bloggers:
             return jsonify({'error': '未能解析出博主昵称，请检查数据内容'}), 400
-        registered = read_txt(paths.aweme_list_dir)
+        video_items = sum(sum(len(v) for v in video.values())
+                          for _picture, video in bloggers.values())
+        picture_items = sum(sum(len(v) for v in picture.values())
+                            for picture, _video in bloggers.values())
         return jsonify({
-            'names': names,
-            'is_new': [name not in registered for name in names],
-            'video_count': len(videos),
-            'picture_count': len(pictures),
-            'video_items': sum(len(v) for v in videos.values()),
-            'picture_items': sum(len(v) for v in pictures.values()),
+            'blogger_count': len(bloggers),
+            'video_items': video_items,
+            'picture_items': picture_items,
             'skipped_lines': stats['skipped_lines'],
             'unknown_types': stats['unknown_types'],
         })
@@ -344,10 +337,6 @@ def create_app():
     @app.post('/api/download')
     def api_download():
         global _ACTIVE
-        payload = request.get_json(silent=True) or {}
-        name = safe_name(payload.get('name') or payload.get('blogger') or '')
-        if not name:
-            return jsonify({'error': '缺少博主名称'}), 400
         with _JSON_LOCK:
             raw_lines = list(_JSON_LINES)
         if not raw_lines:
@@ -356,12 +345,11 @@ def create_app():
         with _LOCK:
             if _ACTIVE is not None and _ACTIVE.is_running():
                 return jsonify({'error': '已有下载任务在执行，请等待或先取消'}), 409
-            task = Task(name)
+            task = Task('全部博主')
             _TASKS[task.id] = task
             _trim_tasks()
             _ACTIVE = task
 
-        register_blogger(name)
         threading.Thread(target=_run_task, args=(task, raw_lines), daemon=True).start()
         return jsonify({'task_id': task.id, 'task': task.snapshot()})
 
@@ -386,7 +374,6 @@ def create_app():
     def api_bloggers():
         names = read_txt(paths.aweme_list_dir)
         return jsonify({
-            'download_dir': paths.get_download_dir(),
             'items': [_blogger_stats(name) for name in names],
         })
 
@@ -449,41 +436,5 @@ def create_app():
             except Exception:
                 pass
         return send_file(target, conditional=True)
-
-    # ---------------- 设置 ----------------
-
-    @app.get('/api/settings')
-    def api_settings_get():
-        return jsonify({
-            'download_dir': config.CONFIGURED_DOWNLOAD_DIR,
-            'user_agent': config.HEADER.get('User-Agent', ''),
-            'port': config.PORT,
-            'defaults': config.default_settings(),
-        })
-
-    @app.put('/api/settings')
-    def api_settings_put():
-        payload = request.get_json(silent=True) or {}
-        patch = {}
-        dir_path = (payload.get('download_dir') or '').strip()
-        user_agent = (payload.get('user_agent') or '').strip()
-        if dir_path:
-            patch['download_dir'] = dir_path
-        if user_agent:
-            patch['header'] = {'User-Agent': user_agent}
-        if not patch:
-            return jsonify({'error': '没有需要保存的内容'}), 400
-
-        with _LOCK:
-            if _ACTIVE is not None and _ACTIVE.is_running():
-                return jsonify({'error': '下载任务进行中，暂不能修改设置'}), 409
-
-        config.save_settings(patch)
-        config.apply_settings()
-        if dir_path:
-            paths.set_download_dir(dir_path)
-        return jsonify({'download_dir': config.CONFIGURED_DOWNLOAD_DIR,
-                        'user_agent': config.HEADER.get('User-Agent', ''),
-                        'active_dir': paths.get_download_dir()})
 
     return app

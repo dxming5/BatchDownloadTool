@@ -14,7 +14,7 @@ import time
 import shutil
 from urllib import request
 
-from config import HEADER, SSL_CONTEXT, DOWNLOAD_TIMEOUT, MAX_RETRY
+import config
 from utils import read_txt, make_dir, append_list_txt
 import paths  # 导入模块而非具体变量，以便动态获取更新后的值
 
@@ -25,18 +25,18 @@ _download_failures = []
 
 def build_opener():
     """构造带请求头与忽略证书校验的下载器"""
-    opener = request.build_opener(request.HTTPSHandler(context=SSL_CONTEXT))
-    opener.addheaders = list(HEADER.items())
+    opener = request.build_opener(request.HTTPSHandler(context=config.SSL_CONTEXT))
+    opener.addheaders = list(config.HEADER.items())
     return opener
 
 
 def save_single_url(url, file_name):
     """下载单个 url 到 file_name，最多重试 MAX_RETRY 次"""
     global _download_failures
-    for attempt in range(MAX_RETRY + 1):
+    for attempt in range(config.MAX_RETRY + 1):
         try:
             opener = build_opener()
-            with opener.open(url, timeout=DOWNLOAD_TIMEOUT) as response, \
+            with opener.open(url, timeout=config.DOWNLOAD_TIMEOUT) as response, \
                     open(file_name, 'wb') as file_handle:
                 shutil.copyfileobj(response, file_handle)
             return True
@@ -47,9 +47,9 @@ def save_single_url(url, file_name):
                     os.remove(file_name)
                 except OSError:
                     pass
-            if attempt >= MAX_RETRY:
+            if attempt >= config.MAX_RETRY:
                 error_msg = '超过最大重试次数，最后异常：{}'.format(error)
-                print("\n    -->当前url({})下载异常次数超过{}次，退出下载！".format(url, MAX_RETRY))
+                print("\n    -->当前url({})下载异常次数超过{}次，退出下载！".format(url, config.MAX_RETRY))
                 # 记录失败信息
                 _download_failures.append({
                     'url': url,
@@ -232,37 +232,34 @@ def print_failure_summary():
     print('\n' + '=' * 60)
 
 
-def download(blogger_name=None, progress=None, should_stop=None, raw_lines=None):
+def download(progress=None, should_stop=None, raw_lines=None):
     """
-    下载协调函数：解析URL并执行下载
+    下载协调函数：按博主分组下载全部内容
 
     Args:
-        blogger_name: 已确认的博主名；为 None 时走 CLI 交互流程
         progress: 进度回调，接收 dict 事件
         should_stop: 取消检查函数
-        raw_lines: 已导入的接口数据行；为 None 时读 json.log（CLI 行为不变）
+        raw_lines: 已导入的接口数据行；为 None 时读 json.log（CLI 行为）
     """
     clear_failures()
-    from url_parser import get_all_url, parse_aweme  # 延迟导入，避免循环依赖
+    from url_parser import load_all_bloggers, parse_aweme  # 延迟导入，避免循环依赖
 
-    if blogger_name is None:
-        blogger_name, all_picture_dict, all_video_dict = get_all_url()
+    if raw_lines is None:
+        bloggers = load_all_bloggers()
     else:
-        if raw_lines is None:
-            raw_lines = read_txt(paths.get_json_log_path())
-        _, all_picture_dict, all_video_dict, _ = parse_aweme(raw_lines)
-    if not blogger_name:
+        bloggers, _ = parse_aweme(raw_lines)
+    if not bloggers:
         return
 
-    from paths import set_sub_path
-    set_sub_path(blogger_name)
-
-    # 抖音条数（按发布时间分组）与待下载文件数（每条可能有多个 URL）分开统计
-    video_total = len(all_video_dict)
-    picture_total = len(all_picture_dict)
-    video_items = sum(len(urls) for urls in all_video_dict.values())
-    picture_items = sum(len(urls) for urls in all_picture_dict.values())
-    total = video_items + picture_items
+    # 统计全部博主的总条数与总文件数
+    totals = []
+    for _name, (picture_dict, video_dict) in bloggers.items():
+        video_items = sum(len(urls) for urls in video_dict.values())
+        picture_items = sum(len(urls) for urls in picture_dict.values())
+        totals.append((len(video_dict), len(picture_dict), video_items, picture_items))
+    video_items_total = sum(item[2] for item in totals)
+    picture_items_total = sum(item[3] for item in totals)
+    total = video_items_total + picture_items_total
     state = {'done': 0}
 
     def relay(event):
@@ -274,22 +271,31 @@ def download(blogger_name=None, progress=None, should_stop=None, raw_lines=None)
         event['percent'] = int(state['done'] / total * 100) if total else 100
         _notify(progress, **event)
 
-    _notify(progress, stage='start', blogger=blogger_name,
-            video_total=video_total, picture_total=picture_total,
-            video_items=video_items, picture_items=picture_items,
-            done=0, total=total, percent=0)
+    from paths import set_sub_path
+    for blogger_name, (all_picture_dict, all_video_dict) in bloggers.items():
+        set_sub_path(blogger_name)
+        video_total = len(all_video_dict)
+        picture_total = len(all_picture_dict)
+        video_items = sum(len(urls) for urls in all_video_dict.values())
+        picture_items = sum(len(urls) for urls in all_picture_dict.values())
 
-    download_by_type(all_video_dict, '视频', relay, should_stop)
-    download_by_type(all_picture_dict, '图片', relay, should_stop)
+        _notify(progress, stage='start', blogger=blogger_name,
+                video_total=video_total, picture_total=picture_total,
+                video_items=video_items, picture_items=picture_items,
+                done=state['done'], total=total,
+                percent=int(state['done'] / total * 100) if total else 100)
+
+        download_by_type(all_video_dict, '视频', relay, should_stop)
+        download_by_type(all_picture_dict, '图片', relay, should_stop)
 
     stopped = bool(should_stop and should_stop())
     percent = int(state['done'] / total * 100) if total else 100
-    _notify(progress, stage='finished', blogger=blogger_name,
+    _notify(progress, stage='finished', blogger='全部',
             done=state['done'], total=total, percent=percent,
             failures=get_failure_list(), stopped=stopped)
 
     if not progress:
-        print('\n <{}>下载结束，已处理 {}/{} 项{}'.format(
-            blogger_name, state['done'], total, '（已取消）' if stopped else ''))
+        print('\n 全部博主下载结束，已处理 {}/{} 项{}'.format(
+            state['done'], total, '（已取消）' if stopped else ''))
         print_failure_summary()
         print('*' * 45 + '\n')

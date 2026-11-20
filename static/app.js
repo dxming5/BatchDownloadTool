@@ -9,8 +9,7 @@
     polling: false,
     logLength: 0,
     galleryName: '',
-    galleryKind: '',
-    parsed: null
+    galleryKind: ''
   };
 
   /* ---------------- 基础请求 ---------------- */
@@ -59,8 +58,6 @@
   async function refreshStatus() {
     try {
       var data = await api('/api/status');
-      $('dirBtn').textContent = '下载目录：' + data.download_dir;
-      $('dirBtn').title = data.download_dir;
       renderLogInfo(data.json_log);
       if (data.active_task && !state.taskId) {
         state.taskId = data.active_task.id;
@@ -85,31 +82,7 @@
     } catch (error) { /* 忽略 */ }
   }
 
-  /* ---------------- 导入数据 ---------------- */
-
-  /* 解析数据：先导入内存，再立即解析出博主与媒体数量 */
-  async function parseData() {
-    var text = $('jsonText').value.trim();
-    if (!text) {
-      toast('请先粘贴接口 JSON', true);
-      return;
-    }
-    try {
-      var data = await postJSON('/api/json-log', { text: text });
-      $('jsonText').value = '';
-      renderLogInfo({ exists: data.lines > 0, lines: data.lines, size: data.size, limit: data.limit });
-      if (!data.lines) {
-        toast('没有可解析的内容' + (data.invalid ? '，忽略非法行 ' + data.invalid + ' 条' : ''), true);
-        return;
-      }
-      if (data.invalid) {
-        toast('已导入 ' + data.added + ' 条，忽略非法行 ' + data.invalid + ' 条');
-      }
-      await parseLog();
-    } catch (error) {
-      toast(error.message, true);
-    }
-  }
+  /* ---------------- 数据管理 ---------------- */
 
   async function clearJSONLog() {
     if (!confirm('确定清空已导入的数据？此操作不可恢复。')) return;
@@ -117,48 +90,8 @@
       await postJSON('/api/json-log/clear');
       toast('已清空导入的数据');
       refreshLogInfo();
-      $('bloggerBox').classList.add('hidden');
       $('parseInfo').textContent = '';
     } catch (error) {
-      toast(error.message, true);
-    }
-  }
-
-  /* ---------------- 解析 ---------------- */
-
-  async function parseLog() {
-    try {
-      var data = await postJSON('/api/parse');
-      state.parsed = data;
-      $('bloggerBox').classList.remove('hidden');
-      $('parseInfo').textContent = '视频 ' + data.video_items + ' 条 · 图片 ' + data.picture_items + ' 张' +
-        (data.skipped_lines ? ' · 跳过 ' + data.skipped_lines + ' 行' : '');
-
-      var box = $('bloggerChoices');
-      box.innerHTML = '';
-      data.names.forEach(function (name, index) {
-        var chip = document.createElement('div');
-        chip.className = 'choice' + (index === 0 ? ' active' : '');
-        var label = document.createElement('span');
-        label.textContent = name;
-        var tag = document.createElement('span');
-        tag.className = 'tag' + (data.is_new[index] ? '' : ' old');
-        tag.textContent = data.is_new[index] ? '新博主' : '已存在';
-        chip.appendChild(label);
-        chip.appendChild(tag);
-        chip.addEventListener('click', function () {
-          Array.prototype.forEach.call(box.children, function (node) {
-            node.classList.remove('active');
-          });
-          chip.classList.add('active');
-          $('nameInput').value = name;
-        });
-        box.appendChild(chip);
-      });
-
-      $('nameInput').value = data.names[0] || '';
-    } catch (error) {
-      $('bloggerBox').classList.add('hidden');
       toast(error.message, true);
     }
   }
@@ -166,14 +99,28 @@
   /* ---------------- 下载任务 ---------------- */
 
   async function startDownload() {
-    var name = $('nameInput').value.trim();
-    if (!name) {
-      toast('请填写博主名称', true);
+    var text = $('jsonText').value.trim();
+    if (!text) {
+      toast('请先粘贴接口 JSON', true);
       return;
     }
     $('downloadBtn').disabled = true;
     try {
-      var data = await postJSON('/api/download', { name: name });
+      var imported = await postJSON('/api/json-log', { text: text });
+      $('jsonText').value = '';
+      renderLogInfo({ exists: imported.lines > 0, lines: imported.lines,
+                      size: imported.size, limit: imported.limit });
+      if (!imported.lines) {
+        toast('没有可解析的内容' + (imported.invalid ? '，忽略非法行 ' + imported.invalid + ' 条' : ''), true);
+        $('downloadBtn').disabled = false;
+        return;
+      }
+      var parsed = await postJSON('/api/parse');
+      $('parseInfo').textContent = parsed.blogger_count + ' 位博主 · 视频 ' +
+        parsed.video_items + ' 条 · 图片 ' + parsed.picture_items + ' 张' +
+        (parsed.skipped_lines ? ' · 跳过 ' + parsed.skipped_lines + ' 行' : '');
+
+      var data = await postJSON('/api/download');
       state.taskId = data.task_id;
       state.logLength = 0;
       $('logBox').textContent = '';
@@ -305,7 +252,7 @@
     var box = $('bloggers');
     try {
       var data = await api('/api/bloggers');
-      $('bloggerHint').textContent = data.items.length + ' 位博主 · ' + data.download_dir;
+      $('bloggerHint').textContent = data.items.length + ' 位博主';
       box.innerHTML = '';
       if (!data.items.length) {
         var empty = document.createElement('p');
@@ -699,52 +646,13 @@
     event.preventDefault();
   }
 
-  /* ---------------- 设置 ---------------- */
-
-  async function openSettings() {
-    try {
-      var data = await api('/api/settings');
-      $('setDir').value = data.download_dir || '';
-      $('setUA').value = data.user_agent || '';
-      $('settingsModal').classList.remove('hidden');
-    } catch (error) {
-      toast(error.message, true);
-    }
-  }
-
-  async function saveSettings() {
-    try {
-      var data = await api('/api/settings', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          download_dir: $('setDir').value.trim(),
-          user_agent: $('setUA').value.trim()
-        })
-      });
-      $('settingsModal').classList.add('hidden');
-      toast('设置已保存：' + (data.active_dir || data.download_dir));
-      refreshStatus();
-      loadBloggers();
-    } catch (error) {
-      toast(error.message, true);
-    }
-  }
-
   /* ---------------- 事件绑定 ---------------- */
 
   function bind() {
-    $('parseBtn').addEventListener('click', parseData);
     $('clearLogBtn').addEventListener('click', clearJSONLog);
     $('downloadBtn').addEventListener('click', startDownload);
     $('cancelBtn').addEventListener('click', cancelTask);
     $('refreshBtn').addEventListener('click', loadBloggers);
-    $('settingsBtn').addEventListener('click', openSettings);
-    $('dirBtn').addEventListener('click', openSettings);
-    $('settingsCancel').addEventListener('click', function () {
-      $('settingsModal').classList.add('hidden');
-    });
-    $('settingsSave').addEventListener('click', saveSettings);
 
     $('lbClose').addEventListener('click', closeLightbox);
     $('lbPrev').addEventListener('click', function () { stepLightbox(-1); });
@@ -762,13 +670,7 @@
 
     $('jsonText').addEventListener('keydown', function (event) {
       if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-        parseData();
-      }
-    });
-
-    $('settingsModal').addEventListener('click', function (event) {
-      if (event.target === $('settingsModal')) {
-        $('settingsModal').classList.add('hidden');
+        startDownload();
       }
     });
   }

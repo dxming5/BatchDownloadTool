@@ -28,14 +28,12 @@ def find_free_port(host, start, span=None):
             except OSError:
                 continue
             return port
-    raise OSError('端口 {}~{} 均被占用，请修改 settings.json 中的 port'.format(start, start + span - 1))
+    raise OSError('端口 {}~{} 均被占用，请修改 config.ini 中的 port'.format(start, start + span - 1))
 
 
 def main():
     """初始化路径、启动服务、打开浏览器"""
     configure_encoding()
-    # settings.json 必须在 set_total_path 之前应用
-    config.apply_settings()
     paths.set_total_path()
 
     try:

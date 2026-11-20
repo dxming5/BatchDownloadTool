@@ -9,7 +9,7 @@ import re
 import os
 import shutil
 
-from config import ENCODING, LEGACY_ENCODINGS
+ENCODING = 'utf-8'
 
 
 def configure_encoding():
@@ -22,23 +22,11 @@ def configure_encoding():
 
 
 def read_txt(txt_dir):
-    """
-    以 UTF-8 读取文本文档，返回非空行组成的列表；
-    若文件是历史遗留的 GBK 编码，则自动回退读取，保证平滑迁移
-    """
+    """以 UTF-8 读取文本文档，返回非空行组成的列表"""
     if not os.path.exists(txt_dir):
         return []
-    with open(txt_dir, mode='rb') as file_handle:
-        raw = file_handle.read()
-    for encoding in (ENCODING,) + LEGACY_ENCODINGS:
-        try:
-            text = raw.decode(encoding)
-            break
-        except (UnicodeDecodeError, LookupError):
-            continue
-    else:
-        text = raw.decode(ENCODING, errors='ignore')
-    return [line.strip() for line in text.splitlines() if line.strip()]
+    with open(txt_dir, mode='r', encoding=ENCODING) as file_handle:
+        return [line.strip() for line in file_handle if line.strip()]
 
 
 def write_txt(txt_dir, text):

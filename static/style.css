@@ -83,12 +83,6 @@ code {
   color: var(--text-dim);
 }
 
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
 /* ---------- 布局 ---------- */
 
 main {
@@ -219,23 +213,6 @@ button:disabled {
   background: rgba(255, 92, 92, .1);
 }
 
-.pill {
-  background: var(--card-2);
-  border: 1px solid var(--line);
-  color: var(--text-dim);
-  border-radius: 999px;
-  padding: 6px 13px;
-  font-size: 12px;
-  max-width: 340px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pill:hover {
-  color: var(--text);
-}
-
 input[type="text"],
 input:not([type]),
 textarea {
@@ -294,46 +271,6 @@ textarea {
 
 .hidden {
   display: none !important;
-}
-
-/* ---------- 解析结果 ---------- */
-
-.choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.choice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--card-2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 7px 12px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.choice.active {
-  border-color: var(--primary);
-  background: var(--primary-soft);
-  color: #bcd6ff;
-}
-
-.tag {
-  font-size: 10px;
-  border-radius: 5px;
-  padding: 1px 6px;
-  background: rgba(52, 211, 153, .16);
-  color: var(--ok);
-}
-
-.tag.old {
-  background: rgba(152, 162, 179, .16);
-  color: var(--text-dim);
 }
 
 /* ---------- 进度 ---------- */
@@ -653,45 +590,6 @@ body.no-scroll {
   .lb-bar {
     bottom: 12px;
   }
-}
-
-/* ---------- 弹窗 ---------- */
-
-.modal {
-  position: fixed;
-  inset: 0;
-  background: rgba(6, 8, 12, .72);
-  display: grid;
-  place-items: center;
-  z-index: 40;
-  padding: 20px;
-}
-
-.modal-body {
-  width: 100%;
-  max-width: 460px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 20px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .5);
-}
-
-.modal-body h3 {
-  margin: 0 0 16px;
-  font-size: 15px;
-}
-
-.field {
-  display: block;
-  margin-bottom: 14px;
-}
-
-.field span {
-  display: block;
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 6px;
 }
 
 /* ---------- 提示 ---------- */
