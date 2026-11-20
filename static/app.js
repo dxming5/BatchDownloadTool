@@ -9,7 +9,8 @@
     polling: false,
     logLength: 0,
     galleryName: '',
-    galleryKind: ''
+    galleryKind: '',
+    scrapeReady: true
   };
 
   /* ---------------- 基础请求 ---------------- */
@@ -53,12 +54,12 @@
     return (index === 0 ? value : value.toFixed(1)) + ' ' + units[index];
   }
 
-  /* ---------------- 状态与日志信息 ---------------- */
+  /* ---------------- 状态 ---------------- */
 
   async function refreshStatus() {
     try {
       var data = await api('/api/status');
-      renderLogInfo(data.json_log);
+      applyScrapeReady(data.scrape_ready);
       if (data.active_task && !state.taskId) {
         state.taskId = data.active_task.id;
         renderTask(data.active_task);
@@ -69,69 +70,47 @@
     }
   }
 
-  function renderLogInfo(info) {
-    if (!info) return;
-    $('logInfo').textContent = info.exists
-      ? '已导入：' + info.lines + ' 条 · ' + formatSize(info.size) + ' / ' + formatSize(info.limit)
-      : '尚未导入数据';
+  /* Playwright 缺失时禁用抓取入口 */
+  function applyScrapeReady(ready) {
+    if (ready === undefined) return;
+    state.scrapeReady = !!ready;
+    var btn = $('scrapeBtn');
+    btn.disabled = !state.scrapeReady;
+    btn.title = state.scrapeReady ? '' : '未安装 playwright，请执行 pip install playwright 与 playwright install chromium';
   }
 
-  async function refreshLogInfo() {
-    try {
-      renderLogInfo(await api('/api/json-log'));
-    } catch (error) { /* 忽略 */ }
-  }
+  /* ---------------- 抓取任务 ---------------- */
 
-  /* ---------------- 数据管理 ---------------- */
-
-  async function clearJSONLog() {
-    if (!confirm('确定清空已导入的数据？此操作不可恢复。')) return;
-    try {
-      await postJSON('/api/json-log/clear');
-      toast('已清空导入的数据');
-      refreshLogInfo();
-      $('parseInfo').textContent = '';
-    } catch (error) {
-      toast(error.message, true);
-    }
-  }
-
-  /* ---------------- 下载任务 ---------------- */
-
-  async function startDownload() {
-    var text = $('jsonText').value.trim();
-    if (!text) {
-      toast('请先粘贴接口 JSON', true);
+  async function startScrape() {
+    var url = $('userUrl').value.trim();
+    if (!url) {
+      toast('请先粘贴博主主页链接', true);
+      $('userUrl').focus();
       return;
     }
-    $('downloadBtn').disabled = true;
+    $('scrapeBtn').disabled = true;
     try {
-      var imported = await postJSON('/api/json-log', { text: text });
-      $('jsonText').value = '';
-      renderLogInfo({ exists: imported.lines > 0, lines: imported.lines,
-                      size: imported.size, limit: imported.limit });
-      if (!imported.lines) {
-        toast('没有可解析的内容' + (imported.invalid ? '，忽略非法行 ' + imported.invalid + ' 条' : ''), true);
-        $('downloadBtn').disabled = false;
-        return;
-      }
-      var parsed = await postJSON('/api/parse');
-      $('parseInfo').textContent = parsed.blogger_count + ' 位博主 · 视频 ' +
-        parsed.video_items + ' 条 · 图片 ' + parsed.picture_items + ' 张' +
-        (parsed.skipped_lines ? ' · 跳过 ' + parsed.skipped_lines + ' 行' : '');
-
-      var data = await postJSON('/api/download');
-      state.taskId = data.task_id;
-      state.logLength = 0;
-      $('logBox').textContent = '';
-      $('failureBox').classList.add('hidden');
-      $('cancelBtn').disabled = false;
-      renderTask(data.task);
-      pollTask();
+      var data = await postJSON('/api/scrape', {
+        url: url,
+        range: $('rangeSelect').value
+      });
+      beginTask(data.task);
+      toast('已开始抓取，浏览器启动后会自动翻页');
     } catch (error) {
-      $('downloadBtn').disabled = false;
+      $('scrapeBtn').disabled = !state.scrapeReady;
       toast(error.message, true);
     }
+  }
+
+  /* 任务启动渲染 */
+  function beginTask(task) {
+    state.taskId = task.id;
+    state.logLength = 0;
+    $('logBox').textContent = '';
+    $('failureBox').classList.add('hidden');
+    $('cancelBtn').disabled = false;
+    renderTask(task);
+    pollTask();
   }
 
   async function pollTask() {
@@ -158,26 +137,43 @@
     state.polling = false;
     state.taskId = null;
     $('cancelBtn').disabled = true;
-    $('downloadBtn').disabled = false;
+    $('scrapeBtn').disabled = !state.scrapeReady;
+    var scraped = task.mode === 'scrape';
     if (task.status === 'cancelled') {
       toast('任务已取消');
     } else if (task.status === 'error') {
-      toast('任务出错：' + (task.logs && task.logs.length ? task.logs[task.logs.length - 1] : '未知错误'), true);
+      toast((scraped ? '抓取失败：' : '任务出错：') +
+        (task.logs && task.logs.length ? task.logs[task.logs.length - 1] : '未知错误'), true);
     } else {
-      toast('下载完成');
+      toast(scraped ? '抓取并下载完成' : '下载完成');
+    }
+    if (scraped && task.scrape_count) {
+      $('parseInfo').textContent = '抓取到 ' + task.scrape_count + ' 条作品';
     }
     renderFailures(task.failures || []);
     refreshBloggers();
-    refreshLogInfo();
   }
 
   function renderTask(task) {
-    $('bar').style.width = (task.percent || 0) + '%';
-    var statusText = task.status === 'running'
-      ? (task.media_type || '准备中') + ' · ' + task.percent + '%（' + task.done + '/' + task.total + '）'
-      : (task.status === 'done' ? '已完成' : task.status === 'cancelled' ? '已取消' : '出错');
+    var scraping = task.phase === 'scrape' && task.status === 'running';
+    /* 抓取阶段没有总量，用页数做一个渐进进度，避免进度条一直停在 0 */
+    var percent = scraping
+      ? Math.min(95, 5 + (task.scrape_pages || 0) * 5)
+      : (task.percent || 0);
+    $('bar').style.width = percent + '%';
+
+    var statusText;
+    if (task.status === 'running') {
+      statusText = scraping
+        ? '抓取中 · 第 ' + (task.scrape_pages || 0) + ' 页 · 累计 ' + (task.scrape_count || 0) + ' 条'
+        : (task.media_type || '准备中') + ' · ' + task.percent + '%（' + task.done + '/' + task.total + '）';
+    } else {
+      statusText = task.status === 'done' ? '已完成' : task.status === 'cancelled' ? '已取消' : '出错';
+    }
     $('progressText').textContent = statusText;
-    $('currentFile').textContent = task.current || '';
+    $('currentFile').textContent = scraping
+      ? (task.blogger ? '博主：' + task.blogger : '')
+      : (task.current || '');
     if (task.status === 'running') {
       $('cancelBtn').disabled = false;
     }
@@ -694,8 +690,13 @@
   /* ---------------- 事件绑定 ---------------- */
 
   function bind() {
-    $('clearLogBtn').addEventListener('click', clearJSONLog);
-    $('downloadBtn').addEventListener('click', startDownload);
+    $('scrapeBtn').addEventListener('click', startScrape);
+    $('userUrl').addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        startScrape();
+      }
+    });
     $('cancelBtn').addEventListener('click', cancelTask);
     $('refreshBtn').addEventListener('click', refreshBloggers);
     $('galleryClose').addEventListener('click', hideGallery);
@@ -715,12 +716,6 @@
       lbDownOnBackdrop = false;
     });
     document.addEventListener('keydown', onLightboxKey);
-
-    $('jsonText').addEventListener('keydown', function (event) {
-      if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-        startDownload();
-      }
-    });
   }
 
   function init() {

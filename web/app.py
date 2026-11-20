@@ -10,6 +10,7 @@ Flask 应用模块
 
 import collections
 import hashlib
+import importlib.util
 import json
 import os
 import threading
@@ -22,6 +23,7 @@ from flask import Flask, Response, abort, jsonify, request, send_file
 import config
 import paths
 import downloader
+import scraper
 from utils import (read_txt, write_list_txt, append_list_txt, rm_dir,
                    make_dir, safe_name)
 from url_parser import parse_aweme, register_blogger
@@ -43,12 +45,14 @@ _JSON_BYTES = 0                      # 已占用字节数（utf-8 估算，含�
 
 
 class Task(object):
-    """单个下载任务的进度与日志容器（线程安全）"""
+    """单个任务的进度与日志容器（线程安全）；抓取与下载共用"""
 
-    def __init__(self, blogger):
+    def __init__(self, blogger, mode='download'):
         self.id = uuid.uuid4().hex
         self.blogger = blogger
-        self.status = 'running'      # running / done / cancelled / error
+        self.mode = mode               # download（粘贴 JSON）/ scrape（抓取并下载）
+        self.phase = 'download'        # scrape / download，前端据此显示阶段
+        self.status = 'running'        # running / done / cancelled / error
         self.percent = 0
         self.done = 0
         self.total = 0
@@ -58,20 +62,45 @@ class Task(object):
         self.picture_total = 0
         self.video_items = 0
         self.picture_items = 0
+        self.scrape_pages = 0
+        self.scrape_count = 0
         self.logs = collections.deque(maxlen=300)
         self.failures = []
         self.started = time.time()
         self.stop_flag = threading.Event()
         self._lock = threading.Lock()
 
+    def set_name(self, blogger):
+        """抓到博主昵称后更新显示名"""
+        if not blogger:
+            return
+        with self._lock:
+            self.blogger = blogger
+
+    def set_phase(self, phase):
+        with self._lock:
+            self.phase = phase
+
     def push(self, event):
-        """接收 downloader 的进度回调"""
+        """接收 downloader 或 scraper 的进度回调"""
         stage = event.get('stage')
         with self._lock:
             self.percent = event.get('percent', self.percent)
             self.done = event.get('done', self.done)
             self.total = event.get('total', self.total)
-            if stage == 'start':
+            if stage == 'scrape':
+                self.phase = 'scrape'
+                self.scrape_pages = event.get('pages', self.scrape_pages)
+                self.scrape_count = event.get('count', self.scrape_count)
+                message = (event.get('message') or '').strip()
+                if message and (not self.logs or self.logs[-1] != message):
+                    self.logs.append('抓取：{}'.format(message))
+            elif stage == 'scrape_done':
+                self.phase = 'scrape'
+                self.scrape_pages = event.get('pages', self.scrape_pages)
+                self.scrape_count = event.get('count', self.scrape_count)
+                self.logs.append('抓取完成，共 {} 条作品，开始下载'.format(self.scrape_count))
+            elif stage == 'start':
                 self.video_total = event.get('video_total', 0)
                 self.picture_total = event.get('picture_total', 0)
                 self.video_items = event.get('video_items', 0)
@@ -102,6 +131,11 @@ class Task(object):
             if message:
                 self.logs.append(message)
 
+    def add_log(self, message):
+        with self._lock:
+            if message:
+                self.logs.append(message)
+
     def is_running(self):
         with self._lock:
             return self.status == 'running'
@@ -111,6 +145,10 @@ class Task(object):
             return {
                 'id': self.id,
                 'blogger': self.blogger,
+                'mode': self.mode,
+                'phase': self.phase,
+                'scrape_pages': self.scrape_pages,
+                'scrape_count': self.scrape_count,
                 'status': self.status,
                 'percent': self.percent,
                 'done': self.done,
@@ -157,6 +195,73 @@ def _run_task(task, raw_lines):
             _clear_imported()
     except Exception as error:  # 线程内异常必须兜住，否则前端一直轮询
         task.mark('error', '任务异常：{}'.format(error))
+    finally:
+        with _LOCK:
+            if _ACTIVE is task:
+                _ACTIVE = None
+
+
+def _scraper_ready():
+    """Playwright 是否已安装；浏览器内核是否下载只能在运行时发现"""
+    try:
+        return importlib.util.find_spec('playwright') is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _run_scrape_task(task, sec_user_id, month_days):
+    """
+    后台线程：抓取博主主页作品 → 转成接口数据行 → 复用下载流程
+
+    抓取与下载串行在同一个任务里，避免占用第二个 _ACTIVE 槽位：
+    paths 的博主路径是全局态，并发下载会互相覆盖目录。
+    """
+    global _ACTIVE
+    try:
+        paths.set_total_path()
+        task.set_phase('scrape')
+        since_ts = int(time.time()) - month_days * 86400 if month_days else None
+        result = scraper.fetch_user_awemes(
+            sec_user_id,
+            profile_dir=config.SCRAPE_PROFILE_DIR,
+            headless=config.SCRAPE_HEADLESS,
+            max_scroll=config.SCRAPE_MAX_SCROLL,
+            idle_rounds=config.SCRAPE_IDLE_ROUNDS,
+            timeout_ms=config.SCRAPE_TIMEOUT_MS,
+            channel=config.SCRAPE_BROWSER_CHANNEL,
+            proxy=config.SCRAPE_PROXY,
+            wait_login=config.SCRAPE_WAIT_LOGIN,
+            since_ts=since_ts,
+            on_progress=task.push,
+            should_stop=task.stop_flag.is_set,
+            verbose=False,
+        )
+
+        if task.stop_flag.is_set() or result.get('cancelled'):
+            task.mark('cancelled', '抓取已取消')
+            return
+
+        task.set_name(result.get('nickname') or sec_user_id)
+        raw_lines = scraper.result_to_lines(result)
+        if not raw_lines:
+            task.mark('error', '未抓到作品：可能未登录、该主页没有公开作品，或作品超出所选时间范围')
+            return
+
+        register_blogger(task.blogger)
+        task.set_phase('download')
+        task.add_log('开始下载：本次抓到 {} 条作品'.format(len(result.get('aweme_list') or [])))
+        downloader.download(progress=task.push,
+                            should_stop=task.stop_flag.is_set,
+                            raw_lines=raw_lines)
+        if task.stop_flag.is_set():
+            task.mark('cancelled', '任务已取消')
+        elif task.is_running():
+            task.mark('done')
+    except ImportError as error:
+        task.mark('error', '未安装 playwright 组件（{}）：请执行 '
+                           'pip install playwright 与 playwright install chromium'.format(error))
+    except Exception as error:  # 线程内异常必须兜住，否则前端一直轮询
+        task.mark('error', '抓取失败：{}'.format(error))
     finally:
         with _LOCK:
             if _ACTIVE is task:
@@ -284,6 +389,8 @@ def create_app():
             'json_log': _json_log_info(),
             'blogger_count': len(read_txt(paths.aweme_list_dir)),
             'active_task': active,
+            'scrape_ready': _scraper_ready(),
+            'scrape_month_days': config.SCRAPE_MONTH_DAYS,
         })
 
     # ---------------- 导入数据（内存） ----------------
@@ -400,6 +507,42 @@ def create_app():
 
         threading.Thread(target=_run_task, args=(task, raw_lines), daemon=True).start()
         return jsonify({'task_id': task.id, 'task': task.snapshot()})
+
+    @app.post('/api/scrape')
+    def api_scrape():
+        """抓取博主主页作品并直接下载（一步式，无需粘贴 JSON）"""
+        global _ACTIVE
+        payload = request.get_json(silent=True) or {}
+        raw = (payload.get('url') or '').strip()
+        if not raw:
+            return jsonify({'error': '请先填写博主主页链接'}), 400
+        if not _scraper_ready():
+            return jsonify({
+                'error': '未安装 playwright：请执行 pip install playwright '
+                         '与 playwright install chromium 后重启服务'
+            }), 503
+        try:
+            sec_user_id = scraper.parse_sec_user_id(raw)
+        except ValueError:
+            return jsonify({
+                'error': '无法识别该链接，请粘贴博主主页地址（https://www.douyin.com/user/...）'
+            }), 400
+
+        want_month = (payload.get('range') or 'all').strip().lower() == 'month'
+        month_days = config.SCRAPE_MONTH_DAYS if want_month else 0
+
+        with _LOCK:
+            if _ACTIVE is not None and _ACTIVE.is_running():
+                return jsonify({'error': '已有任务在执行，请等待或先取消'}), 409
+            task = Task(sec_user_id, mode='scrape')
+            task.set_phase('scrape')
+            _TASKS[task.id] = task
+            _trim_tasks()
+            _ACTIVE = task
+
+        threading.Thread(target=_run_scrape_task,
+                         args=(task, sec_user_id, month_days), daemon=True).start()
+        return jsonify({'task_id': task.id, 'task': task.snapshot()}), 202
 
     @app.get('/api/tasks/<task_id>')
     def api_task(task_id):

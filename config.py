@@ -50,3 +50,16 @@ HOST = _parser.get('web', 'host', fallback='127.0.0.1')
 PORT = _parser.getint('web', 'port', fallback=5000)
 PORT_RANGE = _parser.getint('web', 'port_range', fallback=10)
 IMPORT_MEMORY_LIMIT = max(1, _parser.getint('web', 'import_memory_limit_mb', fallback=100)) * 1024 * 1024
+
+# ---------------- 抓取（Playwright） ----------------
+# profile_dir 留空表示使用项目根下的 .pw_profile（登录态保存在这里，删掉就要重新扫码）
+SCRAPE_PROFILE_DIR = (_parser.get('scrape', 'profile_dir', fallback='').strip()
+                      or os.path.join(BASE_DIR, '.pw_profile'))
+SCRAPE_HEADLESS = _parser.getboolean('scrape', 'headless', fallback=True)
+SCRAPE_WAIT_LOGIN = max(0, _parser.getint('scrape', 'wait_login_seconds', fallback=180))
+SCRAPE_MAX_SCROLL = max(1, _parser.getint('scrape', 'max_scroll', fallback=400))
+SCRAPE_IDLE_ROUNDS = max(1, _parser.getint('scrape', 'idle_rounds', fallback=8))
+SCRAPE_MONTH_DAYS = max(1, _parser.getint('scrape', 'month_days', fallback=30))
+SCRAPE_BROWSER_CHANNEL = _parser.get('scrape', 'browser_channel', fallback='').strip() or None
+SCRAPE_PROXY = _parser.get('scrape', 'proxy', fallback='').strip() or None
+SCRAPE_TIMEOUT_MS = max(5000, _parser.getint('scrape', 'timeout_ms', fallback=30000))

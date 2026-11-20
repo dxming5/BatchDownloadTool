@@ -24,19 +24,25 @@
       <section class="card">
         <div class="card-head">
           <h2>下载</h2>
-          <div class="row tight">
-            <span id="logInfo" class="hint"></span>
-          </div>
         </div>
         <p class="hint">
-          打开抖音网页版 → 博主主页 → F12 → Network → 找到含 <code>aweme_list</code> 的 fetch/xhr 请求，
-          把每页 Response 一行一条粘贴到下面，点「开始下载」即导入数据并下载全部博主（上限 100 MB）。
+          粘贴博主主页链接，自动抓取作品并下载（抓取后直接开始下载，无需再手动操作）。
         </p>
-        <textarea id="jsonText" spellcheck="false" placeholder='{"aweme_list": [ ... ]}'></textarea>
-        <div class="row">
-          <button id="downloadBtn" class="primary">开始下载</button>
-          <button id="clearLogBtn" class="ghost danger">清空数据</button>
+        <div class="row tight">
+          <input id="userUrl" type="text" spellcheck="false"
+                 placeholder="https://www.douyin.com/user/MS4wLjABAAAA...">
         </div>
+        <div class="row">
+          <select id="rangeSelect" class="select">
+            <option value="all">全部作品</option>
+            <option value="month">最近一个月</option>
+          </select>
+          <span class="spacer"></span>
+          <button id="scrapeBtn" class="primary">抓取并下载</button>
+        </div>
+        <p class="hint">
+          登录态缓存在本机，无需每次扫码；若尚未登录，会等待最多 3 分钟以便在弹出的浏览器窗口里扫码。
+        </p>
 
         <div class="divider"></div>
 

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-下载与格式转换模块
-包含网络下载、去重比对、webp转jpg等功能
+下载模块
+包含网络下载、去重比对等功能
 
 设计说明：
     下载过程通过 progress 回调上报事件，CLI 与 Web 各自实现回调；
@@ -71,26 +71,6 @@ def get_url_signature(url, start_tag, end_tag):
     if end < 0:
         return url[start:]
     return url[start:end]
-
-
-def convert_webp_to_jpg(file_name):
-    """webp 转 jpg，转换成功后删除源 webp 文件，返回是否成功"""
-    from PIL import Image  # 延迟导入，避免启动时依赖 PIL
-    try:
-        im = Image.open(file_name)
-        if im.mode == "RGBA":
-            im.load()  # required for png.split()
-            background = Image.new("RGB", im.size, (255, 255, 255))
-            background.paste(im, mask=im.split()[3])
-        save_name = os.path.splitext(file_name)[0] + '.jpg'
-        im.save('{}'.format(save_name), 'JPEG')
-        im.close()
-        if os.path.exists(file_name):
-            os.remove(file_name)
-        return True
-    except Exception as error:
-        print('\n    -->图片转换失败（{}）：{}'.format(file_name, error))
-        return False
 
 
 def _notify(progress, **event):
@@ -182,14 +162,6 @@ def download_by_type(all_url_dict, media_type, progress=None, should_stop=None):
                 saved_signature_set.add(url_signature)
                 # 延迟写入：只保存特征码
                 new_downloaded_urls.append(url_signature)
-                # webp转为jpg
-                if media_type == '图片' and os.path.exists(file_name):
-                    if not convert_webp_to_jpg(file_name):
-                        _download_failures.append({
-                            'url': url,
-                            'file': file_name,
-                            'error': 'webp 转 jpg 失败'
-                        })
 
             _notify(progress, stage='item', media_type=media_type,
                     file=os.path.basename(file_name), url=url,

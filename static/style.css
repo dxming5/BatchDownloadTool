@@ -272,6 +272,25 @@ textarea {
   min-width: 220px;
 }
 
+/* 抓取范围下拉框，与输入框、按钮保持同一行同一高度 */
+.select {
+  appearance: none;
+  background: #12161d url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%2398a2b3'/></svg>") no-repeat right 10px center;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--text);
+  font: inherit;
+  padding: 9px 28px 9px 12px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+
+.select:focus {
+  border-color: #3d6fd4;
+  box-shadow: 0 0 0 3px rgba(47, 123, 255, .15);
+}
+
 /* ---------- 文本 ---------- */
 
 .hint {
