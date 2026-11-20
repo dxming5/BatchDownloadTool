@@ -7,8 +7,8 @@
     2. 不手工构造 a_bogus / msToken / uifid / timestamp——全部交给真实浏览器生成；
     3. 通过监听 /aweme/v1/web/aweme/post/ 接口的响应体拿到原始 JSON，
        滚动到底部触发翻页，直到接口返回 has_more = 0 为止；
-    4. 产物（CLI 模式下写入 ./scrape_output/<博主昵称>/）：
-        - aweme_pages.jsonl  每行一页原始接口响应（可直接喂给 url_parser.parse_aweme）
+    4. 产物（作为独立脚本运行时写入 ./scrape_output/<博主昵称>/）：
+        - aweme_pages.jsonl  每行一页原始接口响应（可直接喂给 downloader.download）
         - aweme_all.json     按 aweme_id 去重后的作品汇总
 
 用法：
@@ -429,19 +429,25 @@ def fetch_user_awemes(sec_user_id, profile_dir=DEFAULT_PROFILE, headless=False,
             # 匿名态抖音只给首屏一页：先等人工登录，再开始翻页
             logged_in = True
             if not stopped and last_page.get('has_more') != 0 and not early_stop:
-                logged_in = wait_for_login(page, wait_login, should_stop=should_stop,
-                                          on_progress=on_progress, verbose=verbose)
-                if logged_in and not cancelled():
-                    # 登录后重新加载主页，让列表按已登录身份重新拉取
-                    before = len(pages)
-                    page.reload(wait_until='domcontentloaded')
-                    waited = 0
-                    while len(pages) == before and waited < 20000:
-                        if cancelled():
-                            break
-                        page.wait_for_timeout(1000)
-                        waited += 1000
-                        drain()
+                # 已登录就不重载：reload 会让首屏被重复请求一次，
+                # 同一页作品要等到下载侧按 aweme_id 去重才被丢掉
+                already_logged, _ = login_state(page)
+                if already_logged:
+                    log('已登录，跳过首屏重载')
+                else:
+                    logged_in = wait_for_login(page, wait_login, should_stop=should_stop,
+                                              on_progress=on_progress, verbose=verbose)
+                    if logged_in and not cancelled():
+                        # 刚登录：重新加载主页，让列表按已登录身份重新拉取
+                        before = len(pages)
+                        page.reload(wait_until='domcontentloaded')
+                        waited = 0
+                        while len(pages) == before and waited < 20000:
+                            if cancelled():
+                                break
+                            page.wait_for_timeout(1000)
+                            waited += 1000
+                            drain()
 
             # 滚动翻页，直到 has_more=0、到达时间边界、连续无新增或被取消
             last_total = len(awemes)
@@ -519,7 +525,7 @@ def result_to_lines(result):
     """
     把抓取结果转成「每行一条接口 Response」的字符串列表
 
-    该格式正是 url_parser.parse_aweme / downloader.download(raw_lines=...) 的输入，
+    该格式正是 url_parser.collect_awemes / downloader.download(raw_lines=...) 的输入，
     因此抓取与既有的下载链路可以零改动对接。
     """
     return [json.dumps(payload, ensure_ascii=False)

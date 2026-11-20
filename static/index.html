@@ -39,25 +39,16 @@
           </select>
           <span class="spacer"></span>
           <button id="scrapeBtn" class="primary">抓取并下载</button>
+          <button id="cancelBtn" class="ghost danger" disabled>取消任务</button>
         </div>
-        <p class="hint">
-          登录态缓存在本机，无需每次扫码；若尚未登录，会等待最多 3 分钟以便在弹出的浏览器窗口里扫码。
-        </p>
-
         <div class="divider"></div>
 
         <div class="progress">
           <div id="bar" class="bar" style="width:0%"></div>
         </div>
         <div class="row tight progress-meta">
-          <span id="parseInfo" class="hint"></span>
           <span class="spacer"></span>
           <span id="progressText" class="hint">空闲中</span>
-        </div>
-        <div class="row">
-          <span id="currentFile" class="hint mono"></span>
-          <span class="spacer"></span>
-          <button id="cancelBtn" class="ghost danger" disabled>取消任务</button>
         </div>
         <pre id="logBox" class="log">等待任务…</pre>
         <details id="failureBox" class="hidden">
@@ -84,11 +75,18 @@
       <section class="card card-preview">
         <div class="card-head">
           <h2 id="galleryTitle">预览</h2>
-          <button id="galleryClose" class="ghost hidden">收起</button>
+          <div class="gallery-tools">
+            <div id="galleryTabs" class="tabs hidden">
+              <button class="tab active" data-kind="image" type="button">图片</button>
+              <button class="tab" data-kind="video" type="button">视频</button>
+            </div>
+            <button id="galleryRefresh" class="ghost hidden" type="button"
+                    title="重新读取该博主的图片和视频">刷新</button>
+          </div>
         </div>
         <div id="gallery" class="gallery hidden"></div>
         <div id="galleryEmpty" class="gallery-empty">
-          <span>在左侧博主列表点击「图片」或「视频」查看预览</span>
+          <span>点击左侧博主列表中的博主查看作品，默认显示图片，可切换为视频</span>
         </div>
       </section>
     </div>

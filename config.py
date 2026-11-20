@@ -49,7 +49,6 @@ SSL_CONTEXT = ssl.create_default_context() if VERIFY_SSL else ssl._create_unveri
 HOST = _parser.get('web', 'host', fallback='127.0.0.1')
 PORT = _parser.getint('web', 'port', fallback=5000)
 PORT_RANGE = _parser.getint('web', 'port_range', fallback=10)
-IMPORT_MEMORY_LIMIT = max(1, _parser.getint('web', 'import_memory_limit_mb', fallback=100)) * 1024 * 1024
 
 # ---------------- 抓取（Playwright） ----------------
 # profile_dir 留空表示使用项目根下的 .pw_profile（登录态保存在这里，删掉就要重新扫码）

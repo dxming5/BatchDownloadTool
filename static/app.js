@@ -9,8 +9,12 @@
     polling: false,
     logLength: 0,
     galleryName: '',
-    galleryKind: '',
-    scrapeReady: true
+    galleryKind: 'image',
+    galleryItems: [],      /* 当前博主的全部作品（图片 + 视频），切换标签复用 */
+    galleryLoading: false,
+    galleryScroll: { image: 0, video: 0 },   /* 两个标签各自的滚动位置 */
+    scrapeReady: true,
+    lastPhase: ''
   };
 
   /* ---------------- 基础请求 ---------------- */
@@ -40,18 +44,6 @@
     box.className = 'toast' + (isError ? ' error' : '');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { box.className = 'toast hidden'; }, 3200);
-  }
-
-  function formatSize(bytes) {
-    if (!bytes) return '0 B';
-    var units = ['B', 'KB', 'MB', 'GB'];
-    var index = 0;
-    var value = bytes;
-    while (value >= 1024 && index < units.length - 1) {
-      value /= 1024;
-      index += 1;
-    }
-    return (index === 0 ? value : value.toFixed(1)) + ' ' + units[index];
   }
 
   /* ---------------- 状态 ---------------- */
@@ -106,6 +98,7 @@
   function beginTask(task) {
     state.taskId = task.id;
     state.logLength = 0;
+    state.lastPhase = task.phase;
     $('logBox').textContent = '';
     $('failureBox').classList.add('hidden');
     $('cancelBtn').disabled = false;
@@ -147,33 +140,32 @@
     } else {
       toast(scraped ? '抓取并下载完成' : '下载完成');
     }
-    if (scraped && task.scrape_count) {
-      $('parseInfo').textContent = '抓取到 ' + task.scrape_count + ' 条作品';
-    }
     renderFailures(task.failures || []);
     refreshBloggers();
   }
 
   function renderTask(task) {
     var scraping = task.phase === 'scrape' && task.status === 'running';
-    /* 抓取阶段没有总量，用页数做一个渐进进度，避免进度条一直停在 0 */
-    var percent = scraping
-      ? Math.min(95, 5 + (task.scrape_pages || 0) * 5)
-      : (task.percent || 0);
+    /* 抓取阶段没有可靠总量，进度条保持不动，只在文字里显示页数与累计条数 */
+    var percent = scraping ? 0 : (task.percent || 0);
     $('bar').style.width = percent + '%';
 
     var statusText;
     if (task.status === 'running') {
       statusText = scraping
         ? '抓取中 · 第 ' + (task.scrape_pages || 0) + ' 页 · 累计 ' + (task.scrape_count || 0) + ' 条'
-        : (task.media_type || '准备中') + ' · ' + task.percent + '%（' + task.done + '/' + task.total + '）';
+        : (task.percent || 0) + '%（' + task.done + '/' + task.total + '）';
     } else {
       statusText = task.status === 'done' ? '已完成' : task.status === 'cancelled' ? '已取消' : '出错';
     }
     $('progressText').textContent = statusText;
-    $('currentFile').textContent = scraping
-      ? (task.blogger ? '博主：' + task.blogger : '')
-      : (task.current || '');
+
+    /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
+    if (state.lastPhase && state.lastPhase !== task.phase) {
+      refreshBloggers();
+    }
+    state.lastPhase = task.phase;
+
     if (task.status === 'running') {
       $('cancelBtn').disabled = false;
     }
@@ -260,43 +252,66 @@
       data.items.forEach(function (item) {
         var row = document.createElement('div');
         row.className = 'blogger';
+        row.dataset.name = item.name;
+        row.tabIndex = 0;
+        row.title = '点击预览「' + item.name + '」的作品（默认图片）';
+        if (state.galleryName === item.name) row.classList.add('active');
+        row.addEventListener('click', function () { openGallery(item.name); });
+        row.addEventListener('keydown', function (event) {
+          /* 行内按钮的按键不触发浏览，避免回车删除时顺带打开预览 */
+          if (event.target !== row) return;
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          openGallery(item.name);
+        });
 
         var name = document.createElement('div');
         name.className = 'name';
         name.textContent = item.name;
         name.title = item.name;
 
-        var stats = document.createElement('div');
-        stats.className = 'stats';
-        stats.textContent = '视频 ' + item.video + ' · 图片 ' + item.picture + ' · ' + formatSize(item.size);
-
         var actions = document.createElement('div');
         actions.className = 'actions';
 
-        var pictureBtn = document.createElement('button');
-        pictureBtn.className = 'ghost';
-        pictureBtn.textContent = '图片';
-        pictureBtn.addEventListener('click', function () { openGallery(item.name, 'image'); });
-
-        var videoBtn = document.createElement('button');
-        videoBtn.className = 'ghost';
-        videoBtn.textContent = '视频';
-        videoBtn.addEventListener('click', function () { openGallery(item.name, 'video'); });
+        var update = document.createElement('button');
+        update.className = 'ghost';
+        update.textContent = '更新';
+        if (item.homepage) {
+          /* 阻止冒泡，点更新不会顺带打开预览 */
+          update.addEventListener('click', function (event) {
+            event.stopPropagation();
+            updateBlogger(item.name);
+          });
+        } else {
+          update.disabled = true;
+          update.title = '缺少 homepage.txt，请重新粘贴该博主链接抓取一次以登记';
+        }
 
         var remove = document.createElement('button');
         remove.className = 'ghost danger';
         remove.textContent = '删除';
-        remove.addEventListener('click', function () { deleteBlogger(item.name); });
+        remove.addEventListener('click', function (event) {
+          event.stopPropagation();
+          deleteBlogger(item.name);
+        });
 
-        actions.appendChild(pictureBtn);
-        actions.appendChild(videoBtn);
+        actions.appendChild(update);
         actions.appendChild(remove);
 
         row.appendChild(name);
-        row.appendChild(stats);
         row.appendChild(actions);
         box.appendChild(row);
       });
+    } catch (error) {
+      toast(error.message, true);
+    }
+  }
+
+  async function updateBlogger(name) {
+    try {
+      var data = await postJSON('/api/bloggers/' + encodeURIComponent(name) + '/update');
+      beginTask(data.task);
+      toast('开始更新 ' + name + '，已下载的作品会自动跳过');
     } catch (error) {
       toast(error.message, true);
     }
@@ -314,10 +329,14 @@
     }
   }
 
-  /* 刷新博主列表；同时收起预览面板，避免整块重建时高度塌缩导致页面跳动 */
+  /* 刷新博主列表；预览开着时同步刷新内容（保留当前标签），关闭时复位 */
   function refreshBloggers() {
     loadBloggers();
-    if (!isGalleryOpen()) hideGallery();
+    if (isGalleryOpen() && state.galleryName) {
+      fetchGallery();
+    } else if (!isGalleryOpen()) {
+      hideGallery();
+    }
   }
 
   var galleryToken = 0;
@@ -329,7 +348,6 @@
   function showGallery() {
     $('gallery').classList.remove('hidden');
     $('galleryEmpty').classList.add('hidden');
-    $('galleryClose').classList.remove('hidden');
   }
 
   /* 收起预览并恢复占位提示；同时作废进行中的请求与取帧任务 */
@@ -337,96 +355,229 @@
     var box = $('gallery');
     galleryToken += 1;
     resetPosterPipeline();
+    resetThumbObserver();
     box.classList.add('hidden');
     box.innerHTML = '';
     state.galleryName = '';
-    state.galleryKind = '';
+    state.galleryKind = 'image';
+    state.galleryItems = [];
+    state.galleryLoading = false;
+    state.galleryScroll = { image: 0, video: 0 };
+    $('galleryTabs').classList.add('hidden');
+    $('galleryRefresh').classList.add('hidden');
+    $('galleryRefresh').disabled = false;
+    $('galleryRefresh').textContent = '刷新';
     $('galleryTitle').textContent = '预览';
-    $('galleryClose').classList.add('hidden');
     $('galleryEmpty').classList.remove('hidden');
+    markActiveBlogger();
   }
 
-  async function openGallery(name, kind) {
-    var box = $('gallery');
-    var kindLabel = kind === 'video' ? '视频' : '图片';
-    if (state.galleryName === name && state.galleryKind === kind && isGalleryOpen()) {
-      hideGallery();
-      return;
+  /* 选中博主后才显示「图片 / 视频」切换与刷新 */
+  function syncGalleryChrome() {
+    var show = !!state.galleryName;
+    $('galleryTabs').classList.toggle('hidden', !show);
+    $('galleryRefresh').classList.toggle('hidden', !show);
+    var buttons = $('galleryTabs').querySelectorAll('.tab');
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].classList.toggle('active', buttons[i].dataset.kind === state.galleryKind);
     }
+  }
+
+  /* 博主行高亮，标识当前预览的是谁 */
+  function markActiveBlogger() {
+    var rows = $('bloggers').querySelectorAll('.blogger');
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle('active', rows[i].dataset.name === state.galleryName);
+    }
+  }
+
+  /* 记住当前标签的滚动位置，切换/刷新后各自复原 */
+  function rememberGalleryScroll() {
+    var kind = state.galleryKind;
+    if (kind !== 'image' && kind !== 'video') return;
+    state.galleryScroll[kind] = $('gallery').scrollTop;
+  }
+
+  /* 点击博主行：打开预览，每次默认回到图片 */
+  function openGallery(name) {
     state.galleryName = name;
-    state.galleryKind = kind;
+    state.galleryKind = 'image';
+    state.galleryScroll = { image: 0, video: 0 };
     showGallery();
-    $('galleryTitle').textContent = name + ' · ' + kindLabel;
-    box.innerHTML = '<p class="hint">加载中…</p>';
+    syncGalleryChrome();
+    markActiveBlogger();
+    fetchGallery();
+  }
+
+  /* 图片 / 视频切换：元数据已缓存，不重新请求 */
+  function setGalleryKind(kind) {
+    if (!state.galleryName) return;
+    if (kind !== 'image' && kind !== 'video') return;
+    if (state.galleryKind === kind) return;
+    rememberGalleryScroll();
+    state.galleryKind = kind;
+    syncGalleryChrome();
+    if (state.galleryLoading) return;
+    renderGallery();
+  }
+
+  /* 刷新：重新读取该博主的图片与视频，保留当前标签与滚动位置 */
+  function refreshGallery() {
+    if (!state.galleryName || state.galleryLoading) return;
+    rememberGalleryScroll();
+    posterFailed = {};   /* 之前取帧失败或已缓存的视频允许重新取首帧 */
+    coverSaving = {};    /* 允许重新回存封面（比如 .cache 被手动清掉） */
+    fetchGallery();
+  }
+
+  async function fetchGallery() {
+    var name = state.galleryName;
+    if (!name) return;
+    var box = $('gallery');
     var token = ++galleryToken;
+    state.galleryLoading = true;
+    resetPosterPipeline();
+    $('galleryRefresh').disabled = true;
+    $('galleryRefresh').textContent = '刷新中…';
+    $('galleryTitle').textContent = name + ' · 加载中…';
+    box.innerHTML = '<p class="hint">加载中…</p>';
     try {
       var data = await api('/api/bloggers/' + encodeURIComponent(name) + '/files');
-      if (token !== galleryToken) return;
-      var items = data.items.filter(function (item) { return item.kind === kind; });
-      box.innerHTML = '';
-      /* 重建列表时中止未完成的取帧任务 */
-      resetPosterPipeline();
-
-      $('galleryTitle').textContent = name + ' · ' + kindLabel + ' ' + items.length + ' 个';
-
-      if (!items.length) {
-        var empty = document.createElement('p');
-        empty.className = 'empty';
-        empty.textContent = '该博主目录下没有可预览的' + kindLabel + '。';
-        box.appendChild(empty);
-        return;
-      }
-
-      var grid = document.createElement('div');
-      grid.className = 'grid';
-      items.forEach(function (item, index) {
-        var tile = document.createElement('div');
-        tile.className = 'tile';
-        if (item.kind === 'video') {
-          var thumb = document.createElement('img');
-          thumb.className = 'tile-thumb';
-          thumb.alt = item.name;
-          thumb.dataset.videoUrl = item.url;
-          tile.appendChild(thumb);
-
-          var playIcon = document.createElement('span');
-          playIcon.className = 'play-icon';
-          playIcon.textContent = '▶';
-          tile.appendChild(playIcon);
-
-          observePoster(thumb);
-          tile.classList.add('clickable');
-          tile.addEventListener('click', function () { openLightbox(items, index); });
-        } else {
-          var img = document.createElement('img');
-          img.src = item.thumb;
-          img.loading = 'lazy';
-          img.alt = item.name;
-          tile.appendChild(img);
-          tile.classList.add('clickable');
-          tile.addEventListener('click', function () { openLightbox(items, index); });
-        }
-        var badge = document.createElement('span');
-        badge.className = 'badge';
-        badge.textContent = item.name;
-        badge.title = item.name;
-        tile.appendChild(badge);
-        grid.appendChild(tile);
-      });
-      box.appendChild(grid);
+      if (token !== galleryToken || state.galleryName !== name) return;
+      state.galleryLoading = false;
+      state.galleryItems = data.items || [];
+      renderGallery();
     } catch (error) {
-      if (token === galleryToken) hideGallery();
+      if (token !== galleryToken) return;
+      state.galleryLoading = false;
+      hideGallery();
       toast(error.message, true);
+      return;
     }
+    if (token === galleryToken) {
+      $('galleryRefresh').disabled = false;
+      $('galleryRefresh').textContent = '刷新';
+    }
+  }
+
+  /* 媒体 URL 带上文件 mtime 作为版本号：文件被覆盖后不会命中旧缓存 */
+  function mediaUrl(item) {
+    return item.url + '&v=' + (item.mtime || 0);
+  }
+
+  function thumbUrl(item) {
+    return item.thumb + '&v=' + (item.mtime || 0);
+  }
+
+  function renderGallery() {
+    var box = $('gallery');
+    var kind = state.galleryKind;
+    var label = kind === 'video' ? '视频' : '图片';
+    var items = state.galleryItems.filter(function (item) { return item.kind === kind; });
+    box.innerHTML = '';
+    /* 重建列表时中止未完成的取帧任务 */
+    resetPosterPipeline();
+    resetThumbObserver();
+    $('galleryTitle').textContent = state.galleryName + ' · ' + label + ' ' + items.length + ' 个';
+
+    if (!items.length) {
+      var empty = document.createElement('p');
+      empty.className = 'empty';
+      empty.textContent = '该博主目录下没有可预览的' + label +
+        '，可切换到' + (kind === 'video' ? '图片' : '视频') + '看看。';
+      box.appendChild(empty);
+      box.scrollTop = 0;
+      return;
+    }
+
+    var grid = document.createElement('div');
+    grid.className = 'grid';
+    items.forEach(function (item, index) {
+      var tile = document.createElement('div');
+      tile.className = 'tile clickable';
+      if (item.kind === 'video') {
+        var thumb = document.createElement('img');
+        thumb.className = 'tile-thumb';
+        thumb.alt = item.name;
+        if (item.cover) {
+          /* 已落盘的封面：不必再取帧，但同样等进入视口再请求 */
+          thumb.dataset.src = item.cover + '&v=' + (item.mtime || 0);
+        } else {
+          thumb.dataset.videoUrl = mediaUrl(item);
+          thumb.dataset.videoRel = item.rel;
+          observePoster(thumb);
+        }
+        tile.appendChild(thumb);
+        observeThumb(thumb);   /* 无 data-src（待取帧）时内部直接返回 */
+
+        var playIcon = document.createElement('span');
+        playIcon.className = 'play-icon';
+        playIcon.textContent = '▶';
+        tile.appendChild(playIcon);
+      } else {
+        var img = document.createElement('img');
+        img.alt = item.name;
+        img.decoding = 'async';
+        img.dataset.src = thumbUrl(item);
+        tile.appendChild(img);
+        observeThumb(img);
+      }
+      tile.addEventListener('click', function () { openLightbox(items, index); });
+      var badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = item.name;
+      badge.title = item.name;
+      tile.appendChild(badge);
+      grid.appendChild(tile);
+    });
+    box.appendChild(grid);
+    /* 显式还原各标签自己的滚动位置：既保证切回来停在原处，
+       也避免浏览器把上一个标签的 scrollTop 带过来（innerHTML 重建不会自动归零） */
+    box.scrollTop = state.galleryScroll[kind] || 0;
+  }
+
+  /* ---------------- 图片缩略图（进入视口才发请求） ---------------- */
+  /*
+   * 不能用 img.loading='lazy' 兜底：src 一旦赋值浏览器就开始下载，
+   * 属性设置晚一步就退化成 eager，整目录的缩略图会被一次性算完。
+   * 因此 src 由 IntersectionObserver 在接近视口时才写入。
+   */
+  var thumbObserver = null;
+
+  function resetThumbObserver() {
+    if (thumbObserver) thumbObserver.disconnect();
+  }
+
+  function observeThumb(img) {
+    var src = img.dataset.src;
+    if (!src) return;
+    if (typeof IntersectionObserver !== 'function') {
+      img.src = src;
+      return;
+    }
+    if (!thumbObserver) {
+      thumbObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (!entry.isIntersecting) return;
+          var el = entry.target;
+          thumbObserver.unobserve(el);
+          el.src = el.dataset.src;
+          delete el.dataset.src;
+        });
+      }, { root: $('gallery'), rootMargin: '240px' });
+    }
+    thumbObserver.observe(img);
   }
 
   /* ---------------- 视频封面（复用单个隐藏 video 取首帧） ---------------- */
 
   var posterObserver = null;
   var posterQueue = [];
-  var posterBusy = false;
-  var posterActive = null;
-  var captureVideo = null;
+  var posterBusy = 0;            /* 当前并行取帧数 */
+  var posterLimit = 3;           /* 并行上限：串行时每个视频都要从头加载，很慢 */
+  var posterActive = [];
+  var posterFailed = {};         /* 本次会话取帧失败的 URL，避免反复等超时 */
+  var videoPool = [];
   var captureCanvas = null;
 
   function observePoster(img) {
@@ -446,15 +597,22 @@
     posterObserver.observe(img);
   }
 
-  function getCaptureVideo() {
-    if (captureVideo) return captureVideo;
-    captureVideo = document.createElement('video');
-    captureVideo.preload = 'metadata';
-    captureVideo.muted = true;
-    captureVideo.playsInline = true;
-    captureVideo.style.cssText = 'position:fixed;left:-9999px;top:0;pointer-events:none;';
-    document.body.appendChild(captureVideo);
-    return captureVideo;
+  function acquireVideo() {
+    for (var i = 0; i < videoPool.length; i++) {
+      if (!videoPool[i].busy) {
+        videoPool[i].busy = true;
+        return videoPool[i];
+      }
+    }
+    var video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.style.cssText = 'position:fixed;left:-9999px;top:0;pointer-events:none;';
+    document.body.appendChild(video);
+    var entry = { video: video, busy: true };
+    videoPool.push(entry);
+    return entry;
   }
 
   function enqueuePoster(img) {
@@ -465,28 +623,34 @@
   }
 
   function pumpPosterQueue() {
-    if (posterBusy) return;
-    var img = posterQueue.shift();
-    while (img && (!img.isConnected || !img.dataset.videoUrl)) {
-      img = posterQueue.shift();
-    }
-    if (!img) return;
-    posterBusy = true;
-    try {
-      captureFrame(img, function () {
-        posterBusy = false;
-        setTimeout(pumpPosterQueue, 0);
-      });
-    } catch (error) {
-      posterBusy = false;
-      setTimeout(pumpPosterQueue, 0);
+    while (posterBusy < posterLimit && posterQueue.length) {
+      var img = posterQueue.shift();
+      if (!img || !img.isConnected || !img.dataset.videoUrl) continue;
+      if (posterFailed[img.dataset.videoUrl]) {
+        img.dataset.posterState = 'failed';
+        continue;
+      }
+      posterBusy += 1;
+      try {
+        captureFrame(acquireVideo(), img, function () {
+          posterBusy -= 1;
+          setTimeout(pumpPosterQueue, 0);
+        });
+      } catch (error) {
+        posterBusy -= 1;
+      }
     }
   }
 
-  function captureFrame(img, done) {
-    var video = getCaptureVideo();
+  function captureFrame(entry, img, done) {
+    var video = entry.video;
     var finished = false;
     var timer = null;
+
+    /* 被打断不等于失败：不记入 posterFailed，下次仍可重新取帧 */
+    function cancel() {
+      finish('cancelled');
+    }
 
     function cleanup() {
       clearTimeout(timer);
@@ -501,8 +665,12 @@
     function finish(state) {
       if (finished) return;
       finished = true;
-      posterActive = null;
+      var index = posterActive.indexOf(cancel);
+      if (index >= 0) posterActive.splice(index, 1);
       if (img.isConnected) img.dataset.posterState = state;
+      if (state === 'failed') posterFailed[img.dataset.videoUrl] = true;
+      if (state === 'done') saveCover(img.dataset.videoRel, img.src);
+      entry.busy = false;
       cleanup();
       done();
     }
@@ -544,12 +712,13 @@
       finish('failed');
     }
 
-    posterActive = { cancel: function () { finish('failed'); } };
+    posterActive.push(cancel);
     video.addEventListener('loadedmetadata', onMeta);
     video.addEventListener('seeked', onSeeked);
     video.addEventListener('loadeddata', onLoadedData);
     video.addEventListener('error', onError);
-    timer = setTimeout(function () { finish('failed'); }, 8000);
+    /* 单个视频取帧超时 4 秒即可，失败的记下来不再重试 */
+    timer = setTimeout(function () { finish('failed'); }, 4000);
 
     video.src = img.dataset.videoUrl;
     video.load();
@@ -558,7 +727,20 @@
   function resetPosterPipeline() {
     if (posterObserver) posterObserver.disconnect();
     posterQueue = [];
-    if (posterActive) posterActive.cancel();
+    var active = posterActive;
+    posterActive = [];
+    active.forEach(function (cancel) { cancel(); });
+  }
+
+  /* 把取到的首帧回存服务端，下次打开直接读 .cache/covers 里的图 */
+  var coverSaving = {};
+
+  function saveCover(relPath, dataUrl) {
+    if (!relPath || !dataUrl || coverSaving[relPath]) return;
+    coverSaving[relPath] = true;
+    postJSON('/api/covers', { path: relPath, data: dataUrl }).catch(function () {
+      coverSaving[relPath] = false;   /* 失败允许以后重试 */
+    });
   }
 
   /* ---------------- 大图预览 ---------------- */
@@ -604,7 +786,7 @@
       img.classList.add('hidden');
       img.removeAttribute('src');
       video.classList.remove('hidden');
-      video.src = item.url;
+      video.src = mediaUrl(item);
       var played = video.play();
       if (played && played.catch) {
         played.catch(function () { /* 自动播放被拦截时由用户手动点播放 */ });
@@ -615,7 +797,7 @@
       video.load();
       video.classList.add('hidden');
       img.classList.remove('hidden');
-      img.src = item.url;
+      img.src = mediaUrl(item);
       img.alt = item.name;
     }
 
@@ -657,7 +839,7 @@
     var item = lightbox.items[index];
     if (!item || item.kind === 'video') return;
     var image = new Image();
-    image.src = item.url;
+    image.src = mediaUrl(item);
     lightboxCache.push(image);
     if (lightboxCache.length > 6) lightboxCache.shift();
   }
@@ -699,7 +881,11 @@
     });
     $('cancelBtn').addEventListener('click', cancelTask);
     $('refreshBtn').addEventListener('click', refreshBloggers);
-    $('galleryClose').addEventListener('click', hideGallery);
+    $('galleryRefresh').addEventListener('click', refreshGallery);
+    $('galleryTabs').addEventListener('click', function (event) {
+      var btn = event.target.closest ? event.target.closest('.tab') : null;
+      if (btn) setGalleryKind(btn.dataset.kind);
+    });
 
     $('lbClose').addEventListener('click', closeLightbox);
     $('lbEdgePrev').addEventListener('click', function () { stepLightbox(-1); });

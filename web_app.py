@@ -46,8 +46,6 @@ def main():
     url = 'http://{}:{}'.format(config.HOST, port)
 
     print('  下载目录：{}'.format(paths.download_dir))
-    print('  导入数据：仅驻留内存（上限 {} MB），重启后需重新导入'.format(
-        config.IMPORT_MEMORY_LIMIT // 1024 // 1024))
     print('  Web 地址：{}  （Ctrl+C 退出）'.format(url))
 
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()

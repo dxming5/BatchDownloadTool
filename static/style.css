@@ -166,6 +166,63 @@ main {
   gap: 9px;
 }
 
+/* 预览卡头部中间：图片/视频切换 + 紧邻其右的刷新 */
+.gallery-tools {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 图片 / 视频切换 */
+.tabs {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3px;
+  background: #12161d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.tabs .tab {
+  padding: 5px 14px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+}
+
+.tabs .tab:hover:not(.active) {
+  color: var(--text);
+}
+
+.tabs .tab.active {
+  background: var(--primary-soft);
+  border-color: rgba(47, 123, 255, .5);
+  color: #cfe0ff;
+}
+
+#galleryRefresh:disabled {
+  cursor: progress;
+}
+
+/* 预览卡头部：图片/视频 + 刷新 一组固定在预览上方正中间，标题靠左 */
+.card-preview .card-head {
+  position: relative;
+}
+
+.card-preview .card-head h2 {
+  /* 中间留给切换组与刷新，标题超长时省略 */
+  max-width: calc(50% - 96px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---------- 控件 ---------- */
 
 .row {
@@ -413,7 +470,7 @@ summary {
   padding-right: 2px;
 }
 
-/* 博主行：名字 + 统计 + 按钮单行显示，放不下时名字/统计先省略 */
+/* 博主行：整行可点击打开预览，名字 + 按钮单行显示，放不下时名字先省略 */
 .blogger {
   display: flex;
   align-items: center;
@@ -423,26 +480,33 @@ summary {
   border: 1px solid var(--line);
   border-radius: 11px;
   padding: 9px 14px;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+
+.blogger:hover {
+  border-color: #3d4a5e;
+}
+
+/* 当前正在预览的博主 */
+.blogger.active {
+  border-color: rgba(47, 123, 255, .6);
+  background: linear-gradient(180deg, var(--primary-soft), rgba(47, 123, 255, .05)), var(--card-2);
+}
+
+.blogger:focus-visible {
+  outline: 2px solid rgba(47, 123, 255, .5);
+  outline-offset: 1px;
 }
 
 .blogger .name {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   min-width: 0;
   font-weight: 600;
   font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.blogger .stats {
-  flex: 0 1 auto;
-  min-width: 0;
-  color: var(--text-dim);
-  font-size: 11.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .blogger .actions {

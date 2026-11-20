@@ -35,13 +35,6 @@ def write_txt(txt_dir, text):
         file_handle.write(text + '\n')
 
 
-def write_list_txt(txt_dir, content_list):
-    """整体覆盖写入列表到txt文档（UTF-8）"""
-    with open(txt_dir, mode='w', encoding=ENCODING) as file_handle:
-        for item in content_list:
-            file_handle.write(item + '\n')
-
-
 def append_list_txt(txt_dir, content_list):
     """批量追加写入列表到txt文档（UTF-8）"""
     with open(txt_dir, mode='a', encoding=ENCODING) as file_handle:
@@ -71,13 +64,3 @@ def safe_name(name):
     """剔除不符合 Windows 文件夹名的字符：\\/:*?"<>|"""
     name = re.sub(r'[\\/:*?"<>|\r\n\t]', '', name)
     return name.strip().rstrip('.').strip()
-
-
-def read_int(prompt):
-    """读取整数，输入非法时提示重新输入"""
-    while True:
-        value = input(prompt).strip()
-        try:
-            return int(value)
-        except ValueError:
-            print('  请输入数字！')
