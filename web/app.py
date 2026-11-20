@@ -17,12 +17,13 @@ import time
 import uuid
 from urllib.parse import quote
 
-from flask import Flask, abort, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, abort, jsonify, request, send_file
 
 import config
 import paths
 import downloader
-from utils import read_txt, write_list_txt, rm_dir, make_dir, safe_name
+from utils import (read_txt, write_list_txt, append_list_txt, rm_dir,
+                   make_dir, safe_name)
 from url_parser import parse_aweme, register_blogger
 
 
@@ -132,6 +133,14 @@ def _trim_tasks():
         _TASKS.popitem(last=False)
 
 
+def _clear_imported():
+    """清空内存中的导入数据（Web 导入不落盘）"""
+    global _JSON_BYTES
+    with _JSON_LOCK:
+        _JSON_LINES.clear()
+        _JSON_BYTES = 0
+
+
 def _run_task(task, raw_lines):
     """后台线程：执行一次下载（raw_lines 为导入数据快照）"""
     global _ACTIVE
@@ -144,6 +153,8 @@ def _run_task(task, raw_lines):
             task.mark('cancelled', '任务已取消')
         elif task.is_running():
             task.mark('done')
+            # 这份数据已经处理完，清空以免下次粘贴时和旧数据一起被下载
+            _clear_imported()
     except Exception as error:  # 线程内异常必须兜住，否则前端一直轮询
         task.mark('error', '任务异常：{}'.format(error))
     finally:
@@ -217,6 +228,17 @@ def _make_thumb(target, size):
     return output
 
 
+def _static_stamp(static_folder):
+    """静态资源的最新修改时间，作为前端资源版本号"""
+    latest = 0
+    for name in ('app.js', 'style.css'):
+        try:
+            latest = max(latest, os.path.getmtime(os.path.join(static_folder, name)))
+        except OSError:
+            continue
+    return latest or time.time()
+
+
 def create_app():
     """构建 Flask 应用"""
     app = Flask(__name__,
@@ -231,7 +253,22 @@ def create_app():
 
     @app.get('/')
     def index():
-        return send_from_directory(app.static_folder, 'index.html')
+        """返回首页，并按静态资源 mtime 注入版本号，避免浏览器沿用旧 JS/CSS"""
+        with open(os.path.join(app.static_folder, 'index.html'), encoding='utf-8') as handle:
+            html = handle.read()
+        stamp = str(int(_static_stamp(app.static_folder)))
+        html = html.replace('/static/app.js', '/static/app.js?v=' + stamp)
+        html = html.replace('/static/style.css', '/static/style.css?v=' + stamp)
+        response = Response(html, mimetype='text/html')
+        response.headers['Cache-Control'] = 'no-cache, must-revalidate'
+        return response
+
+    @app.after_request
+    def disable_static_cache(response):
+        """静态资源每次回源校验，避免前端代码改了浏览器还在用旧缓存"""
+        if request.path.startswith('/static/'):
+            response.headers['Cache-Control'] = 'no-cache, must-revalidate'
+        return response
 
     @app.get('/favicon.ico')
     def favicon():
@@ -256,10 +293,12 @@ def create_app():
         return jsonify(_json_log_info())
 
     @app.post('/api/json-log')
-    def api_json_log_append():
+    def api_json_log_import():
+        """导入接口数据：默认覆盖上一次，append=True 时才追加"""
         global _JSON_BYTES
         payload = request.get_json(silent=True) or {}
         text = payload.get('text') or ''
+        append = bool(payload.get('append'))
 
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if not lines:
@@ -279,13 +318,18 @@ def create_app():
         incoming = sum(len(line.encode('utf-8')) + 1 for line in valid)
         limit = config.IMPORT_MEMORY_LIMIT
         with _JSON_LOCK:
-            if _JSON_BYTES + incoming > limit:
+            base = _JSON_BYTES if append else 0
+            if base + incoming > limit:
                 return jsonify({
-                    'error': '导入数据将超过 {} MB 内存上限，请先清空再导入'.format(
+                    'error': '本次导入超过 {} MB 内存上限，请减少粘贴内容'.format(
                         limit // 1024 // 1024)
                 }), 413
-            _JSON_LINES.extend(valid)
-            _JSON_BYTES += incoming
+            if append:
+                _JSON_LINES.extend(valid)
+                _JSON_BYTES += incoming
+            else:
+                _JSON_LINES[:] = valid
+                _JSON_BYTES = incoming
             total = len(_JSON_LINES)
             size = _JSON_BYTES
 
@@ -294,10 +338,7 @@ def create_app():
 
     @app.post('/api/json-log/clear')
     def api_json_log_clear():
-        global _JSON_BYTES
-        with _JSON_LOCK:
-            _JSON_LINES.clear()
-            _JSON_BYTES = 0
+        _clear_imported()
         return jsonify({'lines': 0, 'size': 0, 'limit': config.IMPORT_MEMORY_LIMIT})
 
     # ---------------- 解析 ----------------
@@ -342,6 +383,13 @@ def create_app():
         if not raw_lines:
             return jsonify({'error': '还没有导入数据，请先粘贴接口 JSON'}), 400
 
+        # 本次任务会下载全部博主，先把它们登记进 aweme_list，博主管理才会显示
+        bloggers, _stats = parse_aweme(raw_lines)
+        if not bloggers:
+            return jsonify({'error': '未能解析出博主昵称，请检查数据内容'}), 400
+        for blogger_name in bloggers:
+            register_blogger(blogger_name)
+
         with _LOCK:
             if _ACTIVE is not None and _ACTIVE.is_running():
                 return jsonify({'error': '已有下载任务在执行，请等待或先取消'}), 409
@@ -373,9 +421,32 @@ def create_app():
     @app.get('/api/bloggers')
     def api_bloggers():
         names = read_txt(paths.aweme_list_dir)
-        return jsonify({
-            'items': [_blogger_stats(name) for name in names],
-        })
+        items = [_blogger_stats(name) for name in names]
+        known = set(names)
+
+        # 目录里已下载但未登记的博主（旧版本下载、手动拷入）一并列出，并补登记
+        download_dir = paths.get_download_dir()
+        try:
+            entries = sorted(os.listdir(download_dir))
+        except OSError:
+            entries = []
+        missing = []
+        for entry in entries:
+            if entry.startswith('.') or entry in known:
+                continue
+            if not os.path.isdir(os.path.join(download_dir, entry)):
+                continue
+            stats = _blogger_stats(entry)
+            if not stats['video'] and not stats['picture']:
+                continue
+            known.add(entry)
+            missing.append(entry)
+            items.append(stats)
+        if missing:
+            # 追加而非整体重写：保持“按出现先后”的顺序，也不覆盖并发新增的行
+            append_list_txt(paths.aweme_list_dir, missing)
+
+        return jsonify({'items': items})
 
     @app.delete('/api/bloggers/<path:name>')
     def api_blogger_delete(name):

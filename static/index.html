@@ -23,11 +23,9 @@
     <div class="col-left">
       <section class="card">
         <div class="card-head">
-          <h2><span class="num">1</span> 下载</h2>
+          <h2>下载</h2>
           <div class="row tight">
             <span id="logInfo" class="hint"></span>
-            <span id="parseInfo" class="hint"></span>
-            <span id="progressText" class="hint">空闲中</span>
           </div>
         </div>
         <p class="hint">
@@ -45,6 +43,11 @@
         <div class="progress">
           <div id="bar" class="bar" style="width:0%"></div>
         </div>
+        <div class="row tight progress-meta">
+          <span id="parseInfo" class="hint"></span>
+          <span class="spacer"></span>
+          <span id="progressText" class="hint">空闲中</span>
+        </div>
         <div class="row">
           <span id="currentFile" class="hint mono"></span>
           <span class="spacer"></span>
@@ -56,12 +59,10 @@
           <ul id="failureList" class="failures"></ul>
         </details>
       </section>
-    </div>
 
-    <div class="col-right">
-      <section class="card">
+      <section class="card card-bloggers">
         <div class="card-head">
-          <h2><span class="num">2</span> 博主管理</h2>
+          <h2>博主管理</h2>
           <div class="row tight">
             <span id="bloggerHint" class="hint"></span>
             <button id="refreshBtn" class="ghost">刷新</button>
@@ -70,20 +71,32 @@
         <div id="bloggers" class="bloggers">
           <p class="empty">暂无博主</p>
         </div>
+      </section>
+    </div>
+
+    <div class="col-preview">
+      <section class="card card-preview">
+        <div class="card-head">
+          <h2 id="galleryTitle">预览</h2>
+          <button id="galleryClose" class="ghost hidden">收起</button>
+        </div>
         <div id="gallery" class="gallery hidden"></div>
+        <div id="galleryEmpty" class="gallery-empty">
+          <span>在左侧博主列表点击「图片」或「视频」查看预览</span>
+        </div>
       </section>
     </div>
   </main>
 
   <div id="lightbox" class="lightbox hidden">
     <button id="lbClose" class="lb-btn lb-close" title="关闭（Esc）">✕</button>
+    <button id="lbEdgePrev" class="lb-edge lb-edge-prev" title="上一个（←）">‹</button>
+    <button id="lbEdgeNext" class="lb-edge lb-edge-next" title="下一个（→）">›</button>
     <img id="lbImg" alt="">
     <video id="lbVideo" class="hidden" controls playsinline preload="metadata"></video>
     <div class="lb-bar">
       <div class="lb-ctrl">
-        <button id="lbPrev" class="lb-btn" title="上一张（←）">‹</button>
         <span id="lbCounter"></span>
-        <button id="lbNext" class="lb-btn" title="下一张（→）">›</button>
       </div>
       <span id="lbCaption" class="mono"></span>
     </div>

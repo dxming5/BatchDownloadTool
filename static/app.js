@@ -167,7 +167,7 @@
       toast('下载完成');
     }
     renderFailures(task.failures || []);
-    loadBloggers();
+    refreshBloggers();
     refreshLogInfo();
   }
 
@@ -274,8 +274,8 @@
         stats.className = 'stats';
         stats.textContent = '视频 ' + item.video + ' · 图片 ' + item.picture + ' · ' + formatSize(item.size);
 
-        var grow = document.createElement('div');
-        grow.className = 'grow';
+        var actions = document.createElement('div');
+        actions.className = 'actions';
 
         var pictureBtn = document.createElement('button');
         pictureBtn.className = 'ghost';
@@ -292,12 +292,13 @@
         remove.textContent = '删除';
         remove.addEventListener('click', function () { deleteBlogger(item.name); });
 
+        actions.appendChild(pictureBtn);
+        actions.appendChild(videoBtn);
+        actions.appendChild(remove);
+
         row.appendChild(name);
         row.appendChild(stats);
-        row.appendChild(grow);
-        row.appendChild(pictureBtn);
-        row.appendChild(videoBtn);
-        row.appendChild(remove);
+        row.appendChild(actions);
         box.appendChild(row);
       });
     } catch (error) {
@@ -309,11 +310,7 @@
     if (!confirm('确定删除 <' + name + '> 及其全部已下载文件？')) return;
     try {
       await api('/api/bloggers/' + encodeURIComponent(name), { method: 'DELETE' });
-      if (state.galleryName === name) {
-        $('gallery').classList.add('hidden');
-        state.galleryName = '';
-        state.galleryKind = '';
-      }
+      if (state.galleryName === name) hideGallery();
       toast('已删除 ' + name);
       loadBloggers();
     } catch (error) {
@@ -321,41 +318,60 @@
     }
   }
 
+  /* 刷新博主列表；同时收起预览面板，避免整块重建时高度塌缩导致页面跳动 */
+  function refreshBloggers() {
+    loadBloggers();
+    if (!isGalleryOpen()) hideGallery();
+  }
+
+  var galleryToken = 0;
+
+  function isGalleryOpen() {
+    return !$('gallery').classList.contains('hidden');
+  }
+
+  function showGallery() {
+    $('gallery').classList.remove('hidden');
+    $('galleryEmpty').classList.add('hidden');
+    $('galleryClose').classList.remove('hidden');
+  }
+
+  /* 收起预览并恢复占位提示；同时作废进行中的请求与取帧任务 */
+  function hideGallery() {
+    var box = $('gallery');
+    galleryToken += 1;
+    resetPosterPipeline();
+    box.classList.add('hidden');
+    box.innerHTML = '';
+    state.galleryName = '';
+    state.galleryKind = '';
+    $('galleryTitle').textContent = '预览';
+    $('galleryClose').classList.add('hidden');
+    $('galleryEmpty').classList.remove('hidden');
+  }
+
   async function openGallery(name, kind) {
     var box = $('gallery');
     var kindLabel = kind === 'video' ? '视频' : '图片';
-    if (state.galleryName === name && state.galleryKind === kind && !box.classList.contains('hidden')) {
-      box.classList.add('hidden');
-      state.galleryName = '';
-      state.galleryKind = '';
+    if (state.galleryName === name && state.galleryKind === kind && isGalleryOpen()) {
+      hideGallery();
       return;
     }
     state.galleryName = name;
     state.galleryKind = kind;
-    box.classList.remove('hidden');
+    showGallery();
+    $('galleryTitle').textContent = name + ' · ' + kindLabel;
     box.innerHTML = '<p class="hint">加载中…</p>';
+    var token = ++galleryToken;
     try {
       var data = await api('/api/bloggers/' + encodeURIComponent(name) + '/files');
+      if (token !== galleryToken) return;
       var items = data.items.filter(function (item) { return item.kind === kind; });
       box.innerHTML = '';
       /* 重建列表时中止未完成的取帧任务 */
       resetPosterPipeline();
 
-      var head = document.createElement('div');
-      head.className = 'gallery-head';
-      var title = document.createElement('h4');
-      title.textContent = name + '（' + kindLabel + ' ' + items.length + ' 个）';
-      var close = document.createElement('button');
-      close.className = 'ghost';
-      close.textContent = '收起';
-      close.addEventListener('click', function () {
-        box.classList.add('hidden');
-        state.galleryName = '';
-        state.galleryKind = '';
-      });
-      head.appendChild(title);
-      head.appendChild(close);
-      box.appendChild(head);
+      $('galleryTitle').textContent = name + ' · ' + kindLabel + ' ' + items.length + ' 个';
 
       if (!items.length) {
         var empty = document.createElement('p');
@@ -402,9 +418,8 @@
         grid.appendChild(tile);
       });
       box.appendChild(grid);
-      box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (error) {
-      box.innerHTML = '';
+      if (token === galleryToken) hideGallery();
       toast(error.message, true);
     }
   }
@@ -559,6 +574,9 @@
     if (!items || !items.length) return;
     lightbox.items = items;
     lightbox.index = index;
+    hideEdges();
+    /* 每次打开预览固定从 20% 音量开始；会话内用户手动调整后切换不再覆盖 */
+    $('lbVideo').volume = 0.2;
     $('lightbox').classList.remove('hidden');
     document.body.classList.add('no-scroll');
     renderLightbox();
@@ -566,6 +584,7 @@
 
   function closeLightbox() {
     var video = $('lbVideo');
+    hideEdges();
     video.pause();
     video.removeAttribute('src');
     video.load();
@@ -606,10 +625,36 @@
 
     $('lbCaption').textContent = item.name;
     $('lbCounter').textContent = (lightbox.index + 1) + ' / ' + lightbox.items.length;
-    $('lbPrev').disabled = lightbox.index === 0;
-    $('lbNext').disabled = lightbox.index === lightbox.items.length - 1;
+    $('lbEdgePrev').disabled = lightbox.index === 0;
+    $('lbEdgeNext').disabled = lightbox.index === lightbox.items.length - 1;
+    syncEdges();
     preloadImage(lightbox.index - 1);
     preloadImage(lightbox.index + 1);
+  }
+
+  /* ---------------- 左右两侧悬浮切换按钮 ---------------- */
+
+  function hideEdges() {
+    $('lbEdgePrev').classList.remove('show');
+    $('lbEdgeNext').classList.remove('show');
+  }
+
+  /* 到首/尾时收起对应的边缘按钮，避免出现不可点击的图标 */
+  function syncEdges() {
+    if ($('lbEdgePrev').disabled) $('lbEdgePrev').classList.remove('show');
+    if ($('lbEdgeNext').disabled) $('lbEdgeNext').classList.remove('show');
+  }
+
+  /* 鼠标进入左右边缘热区（约 16% 宽度，70~180px）时淡入对应按钮 */
+  function updateEdges(event) {
+    if (!isLightboxOpen()) return;
+    var rect = $('lightbox').getBoundingClientRect();
+    var x = event.clientX - rect.left;
+    var hot = Math.min(180, Math.max(70, rect.width * 0.16));
+    var prev = $('lbEdgePrev');
+    var next = $('lbEdgeNext');
+    prev.classList.toggle('show', x <= hot && !prev.disabled);
+    next.classList.toggle('show', x >= rect.width - hot && !next.disabled);
   }
 
   function preloadImage(index) {
@@ -652,11 +697,14 @@
     $('clearLogBtn').addEventListener('click', clearJSONLog);
     $('downloadBtn').addEventListener('click', startDownload);
     $('cancelBtn').addEventListener('click', cancelTask);
-    $('refreshBtn').addEventListener('click', loadBloggers);
+    $('refreshBtn').addEventListener('click', refreshBloggers);
+    $('galleryClose').addEventListener('click', hideGallery);
 
     $('lbClose').addEventListener('click', closeLightbox);
-    $('lbPrev').addEventListener('click', function () { stepLightbox(-1); });
-    $('lbNext').addEventListener('click', function () { stepLightbox(1); });
+    $('lbEdgePrev').addEventListener('click', function () { stepLightbox(-1); });
+    $('lbEdgeNext').addEventListener('click', function () { stepLightbox(1); });
+    $('lightbox').addEventListener('mousemove', updateEdges);
+    $('lightbox').addEventListener('mouseleave', hideEdges);
     /* 只有“按下”和“松开”都在遮罩上时才关闭，避免按钮误触 */
     var lbDownOnBackdrop = false;
     $('lightbox').addEventListener('mousedown', function (event) {

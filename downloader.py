@@ -264,8 +264,9 @@ def download(progress=None, should_stop=None, raw_lines=None):
 
     def relay(event):
         """把分组进度折算成总进度后上抛"""
-        if event.get('stage') == 'item' and not event.get('skipped'):
-            state['done'] += 1
+        # 跳过的已下载文件也算“已处理”，否则进度条永远到不了 100%
+        if event.get('stage') == 'item':
+            state['done'] = min(state['done'] + 1, total)
         event['done'] = state['done']
         event['total'] = total
         event['percent'] = int(state['done'] / total * 100) if total else 100
