@@ -45,7 +45,12 @@ class Platform(object):
 
     def download(self, result, store, on_progress=None, should_stop=None,
                  media_label=''):
-        """这批内容怎么下载：挑哪些、地址怎么取、进度怎么报都由平台决定"""
+        """这批内容怎么下载：挑哪些、地址怎么取由平台决定
+
+        进度必须按「篇」上报（抖音作品 / 小红书笔记 / 微博单条）：
+        一篇内的全部媒体处理完才计 1 篇，不要把图片张数或 URL 条数当 total。
+        ID 同样按篇记录：一篇的全部媒体成功才写入 aweme_id.txt。
+        """
         raise NotImplementedError
 
     # ---------------- 可选 ----------------

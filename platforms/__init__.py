@@ -12,8 +12,10 @@
 from core import registry
 from platforms.douyin import DouyinPlatform
 from platforms.xiaohongshu import XiaohongshuPlatform
+from platforms.weibo import WeiboPlatform
 
 registry.register(DouyinPlatform())
 registry.register(XiaohongshuPlatform())
+registry.register(WeiboPlatform())
 
-__all__ = ['DouyinPlatform', 'XiaohongshuPlatform']
+__all__ = ['DouyinPlatform', 'XiaohongshuPlatform', 'WeiboPlatform']
