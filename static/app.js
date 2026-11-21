@@ -16,7 +16,9 @@
     galleryLoading: false,
     galleryScroll: { image: 0, video: 0 },   /* 两个标签各自的滚动位置 */
     scrapeReady: true,
-    lastPhase: ''
+    lastPhase: '',
+    platforms: [],          /* [{key, label}]，来自 /api/status，新增平台自动出现 */
+    platformFilter: ''      /* 博主列表的平台筛选，空表示全部 */
   };
 
   /* ---------------- 基础请求 ---------------- */
@@ -54,6 +56,7 @@
     try {
       var data = await api('/api/status');
       applyScrapeReady(data.scrape_ready);
+      renderPlatformOptions(data.platforms);
       if (data.active_task && !state.taskId) {
         state.taskId = data.active_task.id;
         renderTask(data.active_task);
@@ -62,6 +65,38 @@
     } catch (error) {
       toast(error.message, true);
     }
+  }
+
+  /* 平台下拉框：选项来自后端注册的平台，新增平台无需改前端 */
+  function renderPlatformOptions(platforms) {
+    if (!platforms || !platforms.length) return;
+    state.platforms = platforms;
+    var select = $('platformFilter');
+    var current = state.platformFilter;
+    select.innerHTML = '';
+    var all = document.createElement('option');
+    all.value = '';
+    all.textContent = '全部平台';
+    select.appendChild(all);
+    platforms.forEach(function (platform) {
+      var option = document.createElement('option');
+      option.value = platform.key;
+      option.textContent = platform.label;
+      select.appendChild(option);
+    });
+    /* 之前选中的平台被移除时回落到全部 */
+    if (current && !platformLabel(current)) {
+      state.platformFilter = '';
+      current = '';
+    }
+    select.value = current;
+  }
+
+  function platformLabel(key) {
+    for (var i = 0; i < state.platforms.length; i++) {
+      if (state.platforms[i].key === key) return state.platforms[i].label;
+    }
+    return '';
   }
 
   /* Playwright 缺失时禁用抓取入口 */
@@ -243,12 +278,17 @@
     try {
       var data = await api('/api/bloggers');
       var groups = data.groups || [];
-      $('bloggerHint').textContent = (data.total || 0) + ' 位博主';
+      var filter = state.platformFilter;
+      if (filter) {
+        groups = groups.filter(function (group) { return group.platform === filter; });
+      }
       box.innerHTML = '';
       if (!groups.length) {
         var empty = document.createElement('p');
         empty.className = 'empty';
-        empty.textContent = '暂无博主，先导入数据并下载一次。';
+        empty.textContent = filter
+          ? '该平台暂无博主，先导入数据并下载一次。'
+          : '暂无博主，先导入数据并下载一次。';
         box.appendChild(empty);
         return;
       }
@@ -916,6 +956,15 @@
     });
     $('cancelBtn').addEventListener('click', cancelTask);
     $('refreshBtn').addEventListener('click', refreshBloggers);
+    $('platformFilter').addEventListener('change', function (event) {
+      state.platformFilter = event.target.value;
+      /* 预览中的博主被筛掉时收起预览，避免列表与预览对不上 */
+      if (state.galleryPlatform && state.platformFilter &&
+          state.galleryPlatform !== state.platformFilter) {
+        hideGallery();
+      }
+      loadBloggers();
+    });
     $('galleryRefresh').addEventListener('click', refreshGallery);
     $('galleryTabs').addEventListener('click', function (event) {
       var btn = event.target.closest ? event.target.closest('.tab') : null;

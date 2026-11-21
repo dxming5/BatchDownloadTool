@@ -304,6 +304,12 @@ textarea {
   box-shadow: 0 0 0 3px rgba(47, 123, 255, .15);
 }
 
+/* 卡片头部的紧凑下拉框：和「刷新」按钮同高，不撑高标题行 */
+.select-sm {
+  font-size: 12px;
+  padding: 6px 26px 6px 10px;
+}
+
 /* ---------- 文本 ---------- */
 
 .hint {
