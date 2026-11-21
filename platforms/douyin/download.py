@@ -218,6 +218,10 @@ def download(result, store, on_progress=None, should_stop=None,
                    create_time=create_time)
             continue
 
+        # 只报真正要下载的作品：已下载、缺发布时间、无可用地址的都在上方 continue 掉了
+        # 并发下载下这条表示「已提交下载」，不代表此刻正在拉取
+        notice('下载 {}'.format(create_time))
+
         # 扩展名未知时先落 .part，下载完成后改名
         ext = entry['ext'] or downloader.PART_EXT
         for index, url in enumerate(urls):
@@ -236,9 +240,6 @@ def download(result, store, on_progress=None, should_stop=None,
     # ---------------- 线程池：并发拉取，结果回主线程聚合 ----------------
     if state['stopped']:
         jobs = []       # 挑选阶段已取消：一个地址都不提交
-    elif jobs:
-        notice('开始下载 {} 条作品（并发 {}，共 {} 个地址）'.format(
-            len(pending), min(workers, len(jobs)), len(jobs)))
 
     for item_id, url, target, ok, final_path, error in downloader.fetch_all(
             jobs, request_headers, workers, cancelled):
