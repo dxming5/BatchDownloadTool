@@ -17,8 +17,8 @@ env/
 .env.*
 
 # ---- 抓取用的浏览器用户数据目录（含登录态，体积大）----
-# 通配：.pw_profile / .pw_profile_xhs / .pw_profile_weibo 等各平台独立目录
-/.pw_profile*/
+# 各平台统一放在 .pw_profile/<平台 key> 下
+/.pw_profile/
 
 # ---- 抓取产物 ----
 /scrape_output/

@@ -12,7 +12,6 @@
 """
 
 import json
-import os
 import re
 import time
 
@@ -41,8 +40,6 @@ DEFAULT_STALE_LIMIT = 12
 
 # 等详情接口响应的上限；响应一到就返回，不靠固定间隔轮询
 DETAIL_WAIT_MS = 3000
-
-DEFAULT_PROFILE = os.path.join(settings.BASE_DIR, '.pw_profile_xhs')
 
 # 首屏由 SSR 下发；结构是 arr(5) → arr(60) → note，这里递归收集原始 note 对象，
 # 不做字段裁剪——noteCard 里可能已经带了图片列表，能省掉补详情
@@ -294,7 +291,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
 
     options = options or {}
     user_id, user_url = parse_user_id(target)
-    profile_dir = options.get('profile_dir') or DEFAULT_PROFILE
+    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('xiaohongshu')
     headless = bool(options.get('headless', True))
     max_scroll = max(1, int(options.get('max_scroll') or 200))
     idle_rounds = max(1, int(options.get('idle_rounds') or 4))

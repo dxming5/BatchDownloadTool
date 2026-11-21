@@ -163,6 +163,10 @@ def image_items(mblog):
     pics 有两种形态：列表，或以 "0"/"1" 为键的字典（旧接口）。
     序号用图片在原微博里的位置（从 1 开始），与落盘命名 `- {序号}` 对齐。
 
+    地址统一取接口给的原图（large，最长边可达 4000+）。
+    微博图床的无水印版恒为最长边 690，与最高画质不可兼得，
+    因此这里不换前缀，固定保留最高画质。
+
     Returns:
         list[dict]: [{'index': 1, 'url': 'https://...'}]
     """
@@ -225,15 +229,44 @@ def _clean_url(value):
     return value if value.startswith('http') else ''
 
 
+def _playback_urls(info):
+    """
+    新版接口的清晰度列表（playback_list），按 quality_level 从高到低取地址
+
+    条目形如 {'play_info': {'label': 'mp4_720p', 'quality_level': 2, 'url': '...'}}，
+    label 与 urls 的键名不同，因此单独收集后追加在 urls 之后。
+    """
+    items = []
+    for holder in (info, info.get('media_info')):
+        if not isinstance(holder, dict):
+            continue
+        for entry in holder.get('playback_list') or []:
+            detail = entry.get('play_info') if isinstance(entry, dict) else None
+            if not isinstance(detail, dict) or not detail.get('url'):
+                continue
+            try:
+                level = int(detail.get('quality_level') or 0)
+            except (TypeError, ValueError):
+                level = 0
+            items.append((level, detail.get('url')))
+    return [url for _level, url in sorted(items, key=lambda item: item[0],
+                                          reverse=True)]
+
+
 def video_items(mblog):
     """
     取出视频微博的地址（一条视频取一个清晰度）
 
-    地址可能出现在两处，按清晰度从高到低取第一个可用的：
-        page_info.urls         多个清晰度，键名如 mp4_720p_mp4
-        page_info.media_info   stream_url_hd / stream_url
+    地址可能出现在三处，按清晰度从高到低取第一个可用的：
+        page_info.urls           多个清晰度，键名如 mp4_720p_mp4
+        media_info.playback_list 新版清晰度列表，带 quality_level
+        page_info.media_info     stream_url_hd / stream_url
 
     page_info.page_url 指向微博自己的播放页而不是媒体文件，不能用。
+
+    注意：微博视频的角标（@昵称 + 微博视频）是转码时烧录进画面的，
+    所有对外直链都是这份带水印文件的不同清晰度，改地址去不掉；
+    这里只挑最高可用清晰度，不做去水印改写。
 
     Returns:
         list[dict]: [{'index': 1, 'url': 'https://...'}]；取不到时为空列表
@@ -251,6 +284,8 @@ def video_items(mblog):
         candidates['stream_url'] = media.get('stream_url')
 
     ordered = [candidates.get(key) for key in VIDEO_QUALITY_ORDER]
+    # playback_list 的 label 不在这张表里，单独按 quality_level 追加
+    ordered.extend(_playback_urls(info))
     # 键名变了也别漏：其余值按接口给的顺序兜底
     ordered.extend(value for key, value in candidates.items()
                    if key not in VIDEO_QUALITY_ORDER)

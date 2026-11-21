@@ -23,6 +23,9 @@ LEGACY_CONFIG_PATH = os.path.join(BASE_DIR, 'config.ini')
 # 各平台共用的抓取参数段
 DEFAULT_SECTION = 'platforms.default'
 
+# 浏览器数据目录根：所有平台共用，各平台在下面按 key 建二级目录（保存登录态）
+PROFILE_ROOT = os.path.join(BASE_DIR, '.pw_profile')
+
 
 def _parse_types(value):
     """把逗号分隔的整数串转成 tuple（标准库无此类型，需自行解析）"""
@@ -100,6 +103,11 @@ _PLATFORM_DEFAULTS = {
 }
 
 
+def platform_profile_dir(key):
+    """某个平台默认的浏览器数据目录：<项目根>/.pw_profile/<平台 key>"""
+    return os.path.join(PROFILE_ROOT, key)
+
+
 def _platform_section(key):
     """平台配置段名；不存在时回退到旧的 [scrape] 段"""
     section = 'platforms.' + key
@@ -147,8 +155,11 @@ def platform_settings(key):
         value = raw(option) or fallback[option]
         return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
+    # 留空时统一落到 .pw_profile/<平台 key>，新增平台无需额外配置
+    profile_dir = raw('profile_dir') or platform_profile_dir(key)
+
     return {
-        'profile_dir': raw('profile_dir'),
+        'profile_dir': profile_dir,
         'headless': flag('headless'),
         'wait_login': number('wait_login_seconds', 0),
         'max_scroll': number('max_scroll', 1),

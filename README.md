@@ -55,9 +55,10 @@ douyin/
 │   ├── index.html
 │   ├── app.js
 │   └── style.css
-├── .pw_profile/               # 抖音抓取用的浏览器数据目录（保存登录态，自动生成）
-├── .pw_profile_xhs/           # 小红书抓取用的浏览器数据目录（与抖音隔离）
-├── .pw_profile_weibo/         # 微博抓取用的浏览器数据目录（扫码登录后自动生成）
+├── .pw_profile/               # 浏览器数据目录根（保存登录态，自动生成）
+│   ├── douyin/                # 抖音的浏览器数据目录
+│   ├── xiaohongshu/           # 小红书的浏览器数据目录
+│   └── weibo/                 # 微博的浏览器数据目录（新增平台同样在下面建目录）
 ├── requirements.txt           # 依赖清单
 ├── download/                  # 下载根目录示例（实际位置由 download_dir 决定，自动创建）
 │   ├── douyin/                # 平台目录（平台标识）
@@ -112,7 +113,7 @@ python web_app.py
 
 ### 抓取说明
 
-- 登录态按平台隔离：抖音在 `.pw_profile/`、小红书在 `.pw_profile_xhs/`、微博在 `.pw_profile_weibo/`（可用 `conf/config.ini` 对应平台段的 `profile_dir` 改），**每个平台只需扫码登录一次**，之后无头运行即可
+- 登录态按平台隔离：统一放在 `.pw_profile/` 下的平台子目录——抖音在 `.pw_profile/douyin/`、小红书在 `.pw_profile/xiaohongshu/`、微博在 `.pw_profile/weibo/`（可用 `conf/config.ini` 对应平台段的 `profile_dir` 改），**每个平台只需扫码登录一次**，之后无头运行即可
 - 首次使用或登录失效时，程序会等待最多 `wait_login_seconds` 秒（默认 180），期间在弹出的浏览器窗口里扫码即可
 - 「最近一个月」会在翻到时间边界时提前停止，不必抓完全部作品
 - 同一时刻只允许一个任务；抓取与下载在同一个任务里先后完成（下载阶段内部多地址并发）
@@ -131,14 +132,15 @@ python web_app.py
 
 ### 微博说明
 
-- **图片与视频**：图片取 `mblog.pics[].large.url`（缺失时回退 `bmiddle` / `thumbnail` / `url`），落成 `picture/{发布时间} - {序号}.{扩展名}`；视频按 `page_info` 取一个清晰度落成 `{发布时间}.mp4`
-- **视频取址**：先看 `page_info.urls`（`mp4_1080p_mp4` → `mp4_720p_mp4` → `mp4_hd_mp4` → `mp4_hd_url`），再退到 `page_info.media_info.stream_url_hd` → `stream_url` → 标清；一条视频只下一个文件，`m3u8` 播放列表直接忽略（落盘只会得到文本）
+- **图片**：取 `mblog.pics[].large.url`（缺失时回退 `bmiddle` / `thumbnail` / `url`），落成 `picture/{发布时间} - {序号}.{扩展名}`。微博的图片水印与分辨率实测不可兼得：`large` / `original` 是同一份 4032x2688 原图但带博主角标，`oslarge` / `osj1080` 无水印但最长边固定 690（图床忽略自定义尺寸参数，`mw2000`、`orj1080` 也都带角标），因此固定取 `large`，保住最高画质
+- **视频**：按 `page_info` 取一个清晰度落成 `{发布时间}.mp4`。视频角标（@昵称 + 微博视频）是微博转码时烧录进画面的，所有直链都带，无法通过改地址去水印；要干净原片只能走作者开启下载权限时的 App「保存到相册」，或视频本身来自外链时去原平台取
+- **视频取址**：先看 `page_info.urls`（`mp4_1080p_mp4` → `mp4_720p_mp4` → `mp4_hd_mp4` → `mp4_hd_url`），再按 `quality_level` 取 `media_info.playback_list` 里的地址，最后退到 `page_info.media_info.stream_url_hd` → `stream_url` → 标清；一条视频只下一个文件，`m3u8` 播放列表直接忽略（落盘只会得到文本）
 - **类型判定**：微博没有抖音那种单一 `aweme_type`，按字段组合判断——`page_info.type` / `object_type` 为 `video`（或带 `media_info`）算视频，且先于图片判断（视频微博的 `pics` 只是封面图）；`pics` 非空算图片；两者都没有的（纯文字、头条文章、转发他人内容）跳过，并在日志里汇总提示跳过几篇
 - 不下载 Live 图与转发微博里的图片 / 视频
 - 抓取不靠滚动页面：登录后直接请求 `m.weibo.cn/api/container/getIndex` 卡片接口，按 `since_id` 翻页，每页间隔 1~2 秒；`card_type != 9`（分组、广告、推荐）自动跳过
-- 首次使用需在弹出的浏览器窗口扫码登录（`headless` 必须为 `false`）；登录态存进 `.pw_profile_weibo/`，之后可无头运行
+- 首次使用需在弹出的浏览器窗口扫码登录（`headless` 必须为 `false`）；登录态存进 `.pw_profile/weibo/`，之后可无头运行
 - 登录态以 `m.weibo.cn/api/config` 的 `data.login` 为准：匿名访客的 Cookie 里同样有 `SUB`/`SUBP`，只看 Cookie 名会把游客当已登录，匿名态只能抓到首页的一小部分微博（表现为「下载不全」），因此未登录会直接中止并提示扫码
-- Cookie 失效或触发风控时接口返回 `ok=0`，程序会直接报错提示重新登录，不会静默返回「没有内容」；抓完第一页还会复核一次登录态，中途掉登录同样中止，不下载残缺数据
+- Cookie 失效或触发风控时接口返回 `ok=0`，程序会直接报错提示重新登录，不会静默返回「没有内容」；但翻到最后一页时接口同样返回 `ok=0`（`msg` 为「这里还没有内容」），这属于正常的结束信号，按抓取完成处理、不报错；抓完第一页还会复核一次登录态，中途掉登录同样中止，不下载残缺数据
 - 进度按微博条数统计：一条微博的图片 / 视频全部处理完才走 1 篇，与抖音、小红书一致
 - 去重按微博 ID（`mblog_id`）：一条微博的全部媒体成功才记录，任一个失败则整条不记录，下次整条重下，与抖音、小红书一致
 - 翻页上限复用 `[platforms.default]` 的 `max_scroll`（微博按「翻页次数」使用，每页约 10 条），防止接口异常时死循环；选「最近一个月」时翻到时间边界会提前停止
@@ -174,7 +176,7 @@ title = 博主作品归档                # 浏览器标签标题
 [platforms.default]
 # 所有平台共用的抓取参数；平台段没写的项都从这里取
 headless = true                     # 抓取时是否无头；首次登录需 false
-profile_dir =                       # 浏览器数据目录，留空 = 项目根/.pw_profile_*
+profile_dir =                       # 浏览器数据目录，留空 = 项目根/.pw_profile/<平台 key>
 wait_login_seconds = 180            # 未登录时等待扫码的时间，0 表示不等
 max_scroll = 400                    # 最大滚动次数（微博按翻页次数使用）
 idle_rounds = 8                     # 连续多少次滚动无新增就停止
@@ -193,7 +195,7 @@ referer = https://www.xiaohongshu.com/   # 下载请求的 Referer
 accept = */*                        # 图片 CDN 要求的 Accept
 
 [platforms.weibo]
-referer = https://m.weibo.cn/       # 图片与视频下载的 Referer
+referer = https://m.weibo.cn/       # 图片与视频下载的 Referer（403 时可改 https://weibo.com/）
 # 翻页上限复用 [platforms.default] 的 max_scroll（微博按页数计，每页约 10 条）
 ```
 

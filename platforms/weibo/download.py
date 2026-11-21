@@ -5,7 +5,9 @@
 每篇（一条微博）按内容类型走两条链路，取址与命名各不相同，落盘统一交给
 downloader 并发执行：
     图片  mblog.pics[].large.url（缺失时回退 bmiddle / thumbnail / url）
+          微博图床的无水印版恒为最长边 690，这里固定取原图以保住最高画质
     视频  page_info 里的一个清晰度地址，落成 {发布时间}.mp4
+          视频角标是转码时烧录的，所有直链都带，无法去水印
 类型由 parser.classify 判定：先看视频（视频微博的 pics 只是一张封面）。
 两类都没有的篇（纯文字、头条文章、转发别人内容）跳过并计数提示。
 
@@ -114,6 +116,10 @@ def download(result, store, on_progress=None, should_stop=None,
 
     ID 记录与抖音、小红书一致：一条微博的全部媒体成功才把 mblog_id 写入
     aweme_id.txt，任一失败则整篇不记录，下次整篇重下；已记录的篇直接跳过。
+
+    图片固定取接口原图（large，最长边可达 4000+）：微博图床的无水印版恒为
+    最长边 690，与最高画质不可兼得。视频角标由微博转码时烧录，所有直链都带，
+    无法去除，这里只取最高可用清晰度。
     """
     entries, skipped_total, dropped = collect(result)
     total = len(entries)

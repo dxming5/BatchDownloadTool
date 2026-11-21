@@ -17,7 +17,6 @@
 只能看到首页的一小部分内容（表现为「下载不全」）。Cookie 只在接口不可用时兜底。
 """
 
-import os
 import random
 import time
 
@@ -44,8 +43,6 @@ LOGIN_MODAL_SELECTOR = '.m-login, .login-btn, [class*="login"]'
 # 直接给扫码登录页，比在页面里点登录入口稳定
 LOGIN_URL = 'https://passport.weibo.cn/signin/login?entry=mweico'
 
-DEFAULT_PROFILE = os.path.join(settings.BASE_DIR, '.pw_profile_weibo')
-
 # 翻页上限的兜底值：正常情况下由 [platforms.default] 的 max_scroll 决定
 # （微博按「翻页次数」使用该值，接口每页约 10 条），只在参数缺失时启用
 DEFAULT_PAGE_LIMIT = 400
@@ -55,6 +52,10 @@ DEFAULT_STALE_LIMIT = 12
 
 # 页间等待区间（秒）：微博接口对高频请求敏感，沿用旧工具节奏
 PAGE_INTERVAL = (1.0, 2.0)
+
+# 翻到底时接口不返回空列表，而是 ok=0 + 这类提示：属于正常结束，不是错误
+# （「这里还没有内容」包含「没有内容」，文案小改也能命中）
+NO_MORE_MESSAGES = ('没有内容', '没有更多', '暂无内容', '内容为空')
 
 REQUEST_HEADERS = {
     'Accept': 'application/json, text/plain, */*',
@@ -80,6 +81,12 @@ def _api_url(uid, since_id):
         API, uid, parser.posts_container(uid), since_id)
 
 
+def _no_more_content(message):
+    """接口提示是否表示「已没有更多内容」（翻到底，不是错误）"""
+    text = str(message or '')
+    return any(keyword in text for keyword in NO_MORE_MESSAGES)
+
+
 def request_json(context, url, timeout_ms, retries=None):
     """
     请求接口并返回 JSON
@@ -87,6 +94,11 @@ def request_json(context, url, timeout_ms, retries=None):
     context.request 与页面共享 Cookie，登录后无需手工拼 Cookie 头。
     ok != 1 通常是未登录 / Cookie 失效 / 风控，直接抛出可读错误，
     不能静默返回空列表让用户误以为「没有内容」。
+    例外：翻到最后一页时接口返回 ok=0 +「这里还没有内容」，
+    这是「没有更多内容」的正常结束信号，返回 None 交给调用方收尾。
+
+    Returns:
+        dict|None: 接口 JSON；已经没有更多内容时返回 None
     """
     attempts = max(1, int(retries if retries is not None else settings.MAX_RETRY) + 1)
     last_error = ''
@@ -108,6 +120,8 @@ def request_json(context, url, timeout_ms, retries=None):
                 if payload.get('ok') == 1:
                     return payload
                 message = payload.get('msg') or payload.get('errmsg') or '未知错误'
+                if _no_more_content(message):
+                    return None
                 raise RuntimeError(
                     '微博接口返回失败（ok={}，retcode={}）：{}；'
                     '通常是未登录、Cookie 失效或被风控，请重新登录后重试'.format(
@@ -270,7 +284,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
     uid = parser.parse_uid(target)
     user_url = parser.home_url(uid)
 
-    profile_dir = options.get('profile_dir') or DEFAULT_PROFILE
+    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('weibo')
     headless = bool(options.get('headless', True))
     timeout_ms = max(5000, int(options.get('timeout_ms') or 30000))
     channel = options.get('browser_channel')
@@ -355,6 +369,22 @@ def fetch_user_posts(target, options=None, since_ts=None,
                           'count': len(mblogs),
                           'message': '第 {} 页请求失败，保留已抓取的 {} 条：{}'.format(
                               page_index + 1, len(mblogs), error)})
+                    break
+                if payload is None:
+                    # 翻到底：接口说「还没有内容」，属于正常结束，不是请求失败。
+                    # 但一条都没拿到时要先排除掉登录失效，否则会把未登录当成空主页。
+                    if not mblogs and not cancelled() \
+                            and not current_login_state(page, timeout_ms):
+                        raise RuntimeError(
+                            '微博接口返回「没有内容」且登录态已失效，'
+                            '请重新登录后重试（登录态保存在 {}）'.format(profile_dir))
+                    message = '第 {} 页已无更多内容，抓取结束（累计 {} 条）'.format(
+                        page_index, len(mblogs))
+                    log(message)
+                    emit({'stage': 'scrape', 'pages': page_index - 1,
+                          'count': len(mblogs), 'message': message})
+                    page_index -= 1
+                    has_more = False
                     break
                 pages.append(payload)
                 data = payload.get('data') or {}

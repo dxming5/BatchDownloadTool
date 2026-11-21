@@ -10,7 +10,6 @@
 """
 
 import json
-import os
 import re
 import time
 
@@ -35,8 +34,6 @@ LOGIN_MODAL_SELECTOR = ('[data-e2e="login-modal"], [data-e2e="login-panel"],'
 
 # 抓取范围早停阈值：连续这么多条作品都早于截止时间，就不再往下翻
 DEFAULT_STALE_LIMIT = 12
-
-DEFAULT_PROFILE = os.path.join(settings.BASE_DIR, '.pw_profile')
 
 
 def parse_sec_user_id(raw):
@@ -86,7 +83,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     from playwright.sync_api import sync_playwright
 
     options = options or {}
-    profile_dir = options.get('profile_dir') or DEFAULT_PROFILE
+    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('douyin')
     headless = bool(options.get('headless', True))
     max_scroll = max(1, int(options.get('max_scroll') or 400))
     idle_rounds = max(1, int(options.get('idle_rounds') or 8))
