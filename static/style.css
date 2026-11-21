@@ -345,6 +345,11 @@ textarea {
   margin: 18px 0 16px;
 }
 
+/* 进度条独占一行；文字绝对定位叠在条上，不占位也不改变条长 */
+.progress-row {
+  position: relative;
+}
+
 .progress {
   height: 10px;
   border-radius: 999px;
@@ -361,8 +366,19 @@ textarea {
   transition: width .3s ease;
 }
 
-.progress-meta {
-  margin-top: 8px;
+/* 叠在 10px 条上的进度文字：不进条内，避开 overflow 裁剪 */
+.progress-text {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  color: #e6edf9;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .65);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .log {

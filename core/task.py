@@ -77,14 +77,14 @@ class Task(object):
                 self.phase = 'scrape'
                 self.scrape_pages = event.get('pages', self.scrape_pages)
                 self.scrape_count = event.get('count', self.scrape_count)
-                self.logs.append('抓取完成，共 {} 条作品，开始下载'.format(self.scrape_count))
+                self.logs.append('抓取完成，共 {} 条作品'.format(self.scrape_count))
             elif stage == 'start':
                 self.video_total = event.get('video_total', 0)
                 self.picture_total = event.get('picture_total', 0)
                 self.video_items = event.get('video_items', 0)
                 self.picture_items = event.get('picture_items', 0)
-                self.logs.append('开始下载 <{}>：视频 {} 篇，图文 {} 篇'.format(
-                    self.blogger, self.video_total, self.picture_total))
+                self.logs.append('开始下载 {} <{}>'.format(
+                    self.platform_label, self.blogger))
             elif stage == 'notice':
                 message = (event.get('message') or '').strip()
                 if message:

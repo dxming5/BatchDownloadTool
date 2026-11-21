@@ -183,19 +183,13 @@
 
   function renderTask(task) {
     var scraping = task.phase === 'scrape' && task.status === 'running';
-    /* 抓取阶段没有可靠总量，进度条保持不动，只在文字里显示页数与累计条数 */
+    /* 进度条只表示下载进度：抓取阶段没有可靠总量，条保持不动 */
     var percent = scraping ? 0 : (task.percent || 0);
     $('bar').style.width = percent + '%';
 
-    var statusText;
-    if (task.status === 'running') {
-      statusText = scraping
-        ? '抓取中 · 第 ' + (task.scrape_pages || 0) + ' 页 · 累计 ' + (task.scrape_count || 0) + ' 条'
-        : (task.percent || 0) + '%（' + task.done + '/' + task.total + '）';
-    } else {
-      statusText = task.status === 'done' ? '已完成' : task.status === 'cancelled' ? '已取消' : '出错';
-    }
-    $('progressText').textContent = statusText;
+    /* 条上文字只表示这条进度；还没有总量（如抓取阶段）时显示 0%（0/0） */
+    $('progressText').textContent = percent + '%（' +
+      (task.done || 0) + '/' + (task.total || 0) + '）';
 
     /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
     if (state.lastPhase && state.lastPhase !== task.phase) {
@@ -613,7 +607,7 @@
 
   /* ---------------- 图片缩略图（进入视口才发请求） ---------------- */
   /*
-   * 不能用 img.loading='lazy' 兜底：src 一旦赋值浏览器就开始下载，
+   * 不能用 img.loading='lazy' 兜底：src 一旦赋值浏览器就会请求该图，
    * 属性设置晚一步就退化成 eager，整目录的缩略图会被一次性算完。
    * 因此 src 由 IntersectionObserver 在接近视口时才写入。
    */
