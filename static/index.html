@@ -16,11 +16,12 @@
           <h2>下载</h2>
         </div>
         <p class="hint">
-          粘贴博主主页链接，自动抓取作品并下载。
+          粘贴博主主页链接，每行一个，可一次粘贴多个（依次执行）。
         </p>
         <div class="row tight">
-          <input id="userUrl" type="text" spellcheck="false"
-                 placeholder="https://www.douyin.com/user/MS4wLjABAAAA...">
+          <textarea id="userUrl" rows="3" spellcheck="false"
+                    placeholder="https://www.douyin.com/user/MS4wLjABAAAA...
+https://www.xiaohongshu.com/user/profile/xxxxxxxx"></textarea>
         </div>
         <div class="row">
           <select id="rangeSelect" class="select">
@@ -52,6 +53,8 @@
           <div class="row tight">
             <select id="platformFilter" class="select select-sm"
                     title="按平台筛选博主"></select>
+            <button id="updateAllBtn" class="ghost"
+                    title="更新所选平台下的全部博主，已下载的作品会自动跳过">更新</button>
             <button id="refreshBtn" class="ghost">刷新</button>
           </div>
         </div>

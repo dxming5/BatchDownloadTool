@@ -280,9 +280,15 @@ textarea {
   line-height: 1.55;
 }
 
-.row > input {
+.row > input,
+.row > textarea {
   flex: 1;
   min-width: 220px;
+}
+
+/* 主页链接输入框：多行，但不必像通用 textarea 那么高 */
+#userUrl {
+  min-height: 84px;
 }
 
 /* 抓取范围下拉框，与输入框、按钮保持同一行同一高度 */

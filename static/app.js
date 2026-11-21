@@ -18,7 +18,10 @@
     scrapeReady: true,
     lastPhase: '',
     platforms: [],          /* [{key, label}]，来自 /api/status，新增平台自动出现 */
-    platformFilter: ''      /* 博主列表的平台筛选，空表示全部 */
+    platformFilter: '',     /* 博主列表的平台筛选，空表示全部 */
+    bloggers: [],           /* 最近一次拉到的分组数据，批量更新时用 */
+    /* 批量任务：mode 为 'scrape'（依次抓取链接）或 'update'（依次更新博主） */
+    batch: null             /* {mode,queue,total,index,done,failed,errors,stopped,range,current} */
   };
 
   /* ---------------- 基础请求 ---------------- */
@@ -106,17 +109,61 @@
     var btn = $('scrapeBtn');
     btn.disabled = !state.scrapeReady;
     btn.title = state.scrapeReady ? '' : '未安装 playwright，请执行 pip install playwright 与 playwright install chromium';
+    syncUpdateBtn();
+  }
+
+  /* 有任务在跑或缺少 playwright 时禁用「更新」（批量）按钮 */
+  function syncUpdateBtn() {
+    $('updateAllBtn').disabled = !state.scrapeReady || !!state.taskId || !!state.batch;
   }
 
   /* ---------------- 抓取任务 ---------------- */
 
+  /* 把输入框内容拆成链接列表：空白、中英文逗号/分号/顿号都算分隔，顺带去重 */
+  function splitUrls(raw) {
+    var seen = {};
+    var urls = [];
+    (raw || '').split(/[\s,，、;；]+/).forEach(function (part) {
+      /* 兼容从聊天工具复制时带的引号与尖括号 */
+      var value = part.replace(/^["'<]+/, '').replace(/["'>]+$/, '');
+      if (!value || seen[value]) return;
+      seen[value] = 1;
+      urls.push(value);
+    });
+    return urls;
+  }
+
   async function startScrape() {
-    var url = $('userUrl').value.trim();
-    if (!url) {
+    var urls = splitUrls($('userUrl').value);
+    if (!urls.length) {
       toast('请先粘贴博主主页链接', true);
       $('userUrl').focus();
       return;
     }
+    if (state.taskId || state.batch) {
+      toast('已有任务在执行，请等待或先取消', true);
+      return;
+    }
+    if (urls.length === 1) {
+      await submitScrape(urls[0]);
+      return;
+    }
+
+    state.batch = {
+      mode: 'scrape', queue: urls.slice(), total: urls.length,
+      index: 0, done: 0, failed: 0, errors: [], stopped: false,
+      range: $('rangeSelect').value
+    };
+    $('logBox').textContent = '';
+    state.logLength = 0;
+    $('failureBox').classList.add('hidden');
+    $('scrapeBtn').disabled = true;
+    syncUpdateBtn();
+    nextBatchItem();
+  }
+
+  /* 单条链接：提交后在 beginTask 里接管轮询 */
+  async function submitScrape(url) {
     $('scrapeBtn').disabled = true;
     try {
       var data = await postJSON('/api/scrape', {
@@ -136,8 +183,11 @@
     state.taskId = task.id;
     state.logLength = 0;
     state.lastPhase = task.phase;
-    $('logBox').textContent = '';
-    $('failureBox').classList.add('hidden');
+    /* 批量更新时保留前面博主的日志，整批共用一块日志框 */
+    if (!state.batch) {
+      $('logBox').textContent = '';
+      $('failureBox').classList.add('hidden');
+    }
     $('cancelBtn').disabled = false;
     renderTask(task);
     pollTask();
@@ -167,7 +217,32 @@
     state.polling = false;
     state.taskId = null;
     $('cancelBtn').disabled = true;
-    $('scrapeBtn').disabled = !state.scrapeReady;
+    $('scrapeBtn').disabled = !state.scrapeReady || !!state.batch;
+
+    /* 批量：一条跑完接着下一条，提示与列表刷新留到整批结束 */
+    if (state.batch) {
+      var job = state.batch;
+      var lastLog = task.logs && task.logs.length ? task.logs[task.logs.length - 1] : '';
+      var noNew = lastLog.indexOf('没有可下载内容') !== -1;   /* 已全部下载过：不算失败 */
+      if (task.status === 'cancelled') {
+        job.stopped = true;
+        job.queue.length = 0;
+      } else if (task.status === 'error' && !noNew) {
+        job.failed += 1;
+        job.errors.push((job.current || task.blogger || '') + '：' + (lastLog || '未知错误'));
+      } else {
+        job.done += 1;
+      }
+      renderFailures(task.failures || []);
+      if (job.stopped || !job.queue.length) {
+        endBatch();
+      } else {
+        nextBatchItem();
+      }
+      syncUpdateBtn();
+      return;
+    }
+
     var scraped = task.mode === 'scrape';
     if (task.status === 'cancelled') {
       toast('任务已取消');
@@ -188,11 +263,12 @@
     $('bar').style.width = percent + '%';
 
     /* 条上文字只表示这条进度；还没有总量（如抓取阶段）时显示 0%（0/0） */
-    $('progressText').textContent = percent + '%（' +
+    var prefix = state.batch ? '[' + state.batch.index + '/' + state.batch.total + '] ' : '';
+    $('progressText').textContent = prefix + percent + '%（' +
       (task.done || 0) + '/' + (task.total || 0) + '）';
 
     /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
-    if (state.lastPhase && state.lastPhase !== task.phase) {
+    if (!state.batch && state.lastPhase && state.lastPhase !== task.phase) {
       refreshBloggers();
     }
     state.lastPhase = task.phase;
@@ -204,6 +280,7 @@
     if (task.failures && task.failures.length) {
       renderFailures(task.failures);
     }
+    syncUpdateBtn();
   }
 
   function appendLogs(logs) {
@@ -271,7 +348,8 @@
     var box = $('bloggers');
     try {
       var data = await api('/api/bloggers');
-      var groups = data.groups || [];
+      state.bloggers = data.groups || [];
+      var groups = state.bloggers;
       var filter = state.platformFilter;
       if (filter) {
         groups = groups.filter(function (group) { return group.platform === filter; });
@@ -382,6 +460,96 @@
     } catch (error) {
       toast(error.message, true);
     }
+  }
+
+  /* ---------------- 批量更新（前端串行调用单博主更新） ---------------- */
+
+  /* 点「更新」：把下拉框所选平台下登记过主页链接的博主排成队列，逐个更新 */
+  function startBatchUpdate() {
+    if (state.batch) return;
+    if (state.taskId) {
+      toast('已有任务在执行，请等待或先取消', true);
+      return;
+    }
+    var platform = state.platformFilter;
+    var queue = [];
+    state.bloggers.forEach(function (group) {
+      if (platform && group.platform !== platform) return;
+      group.items.forEach(function (item) {
+        if (item.homepage) {
+          queue.push({ platform: group.platform, name: item.name });
+        }
+      });
+    });
+    if (!queue.length) {
+      toast(platform
+        ? '该平台没有可更新的博主（重新粘贴主页链接抓取一次即可登记）'
+        : '没有可更新的博主（重新粘贴主页链接抓取一次即可登记）', true);
+      return;
+    }
+    var label = platform ? platformLabel(platform) : '全部平台';
+    if (!confirm('确定更新「' + label + '」下的 ' + queue.length +
+                 ' 位博主？已下载的作品会自动跳过。')) return;
+
+    state.batch = {
+      mode: 'update', queue: queue, total: queue.length, index: 0,
+      done: 0, failed: 0, errors: [], stopped: false
+    };
+    $('logBox').textContent = '';
+    state.logLength = 0;
+    $('failureBox').classList.add('hidden');
+    syncUpdateBtn();
+    nextBatchItem();
+  }
+
+  /*
+   * 取队列里的下一条：抓取模式提交链接，更新模式提交博主
+   * 请求成功走正常轮询，失败记一笔后直接跳到下一条
+   */
+  function nextBatchItem() {
+    var job = state.batch;
+    if (!job || job.stopped || !job.queue.length) {
+      endBatch();
+      return;
+    }
+    var target = job.queue.shift();
+    job.index = job.total - job.queue.length;
+    var title = job.mode === 'scrape' ? target : target.name;
+    job.current = title;
+    $('logBox').textContent += '\n=== [' + job.index + '/' + job.total + '] ' +
+      title + ' ===\n';
+    $('logBox').scrollTop = $('logBox').scrollHeight;
+    var request = job.mode === 'scrape'
+      ? postJSON('/api/scrape', { url: target, range: job.range })
+      : postJSON(bloggerBase(target.platform, target.name) + '/update');
+    request.then(function (data) {
+      beginTask(data.task);
+      syncUpdateBtn();
+    }).catch(function (error) {
+      job.failed += 1;
+      job.errors.push(title + '：' + error.message);
+      nextBatchItem();
+    });
+  }
+
+  function endBatch() {
+    var job = state.batch;
+    state.batch = null;
+    $('scrapeBtn').disabled = !state.scrapeReady;
+    syncUpdateBtn();
+    if (!job) return;
+    var unit = job.mode === 'scrape' ? ' 个链接' : ' 位博主';
+    job.errors.forEach(function (line) {
+      $('logBox').textContent += '失败：' + line + '\n';
+    });
+    $('logBox').scrollTop = $('logBox').scrollHeight;
+    if (job.stopped) {
+      toast('批量任务已取消，已完成 ' + job.done + unit);
+    } else {
+      toast('批量任务结束：已完成 ' + job.done + unit +
+        (job.failed ? '，失败 ' + job.failed + unit : ''));
+    }
+    refreshBloggers();
   }
 
   /* 刷新博主列表；预览开着时同步刷新内容（保留当前标签），关闭时复位 */
@@ -942,13 +1110,15 @@
 
   function bind() {
     $('scrapeBtn').addEventListener('click', startScrape);
+    /* 多行输入框里回车要能换行，提交改用 Ctrl/⌘ + Enter */
     $('userUrl').addEventListener('keydown', function (event) {
-      if (event.key === 'Enter') {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
         startScrape();
       }
     });
     $('cancelBtn').addEventListener('click', cancelTask);
+    $('updateAllBtn').addEventListener('click', startBatchUpdate);
     $('refreshBtn').addEventListener('click', refreshBloggers);
     $('platformFilter').addEventListener('change', function (event) {
       state.platformFilter = event.target.value;
