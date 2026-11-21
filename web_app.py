@@ -11,14 +11,13 @@ import socket
 import threading
 import webbrowser
 
-import config
-from utils import configure_encoding
-import paths
+from conf import settings
+from core.utils import configure_encoding
 
 
 def find_free_port(host, start, span=None):
     """在 [start, start+span) 区间内寻找可用端口"""
-    span = span or config.PORT_RANGE
+    span = span or settings.PORT_RANGE
     for offset in range(span):
         port = start + offset
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -28,13 +27,13 @@ def find_free_port(host, start, span=None):
             except OSError:
                 continue
             return port
-    raise OSError('端口 {}~{} 均被占用，请修改 config.ini 中的 port'.format(start, start + span - 1))
+    raise OSError('端口 {}~{} 均被占用，请修改 conf/config.ini 中的 port'.format(
+        start, start + span - 1))
 
 
 def main():
-    """初始化路径、启动服务、打开浏览器"""
+    """启动服务并打开浏览器"""
     configure_encoding()
-    paths.set_total_path()
 
     try:
         from web.app import create_app
@@ -42,14 +41,14 @@ def main():
         raise SystemExit('缺少 Flask 依赖，请先执行：pip install -r requirements.txt')
 
     app = create_app()
-    port = find_free_port(config.HOST, config.PORT)
-    url = 'http://{}:{}'.format(config.HOST, port)
+    port = find_free_port(settings.HOST, settings.PORT)
+    url = 'http://{}:{}'.format(settings.HOST, port)
 
-    print('  下载目录：{}'.format(paths.download_dir))
+    print('  下载目录：{}'.format(settings.CONFIGURED_DOWNLOAD_DIR))
     print('  Web 地址：{}  （Ctrl+C 退出）'.format(url))
 
     threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    app.run(host=config.HOST, port=port, threaded=True, debug=False, use_reloader=False)
+    app.run(host=settings.HOST, port=port, threaded=True, debug=False, use_reloader=False)
 
 
 if __name__ == '__main__':

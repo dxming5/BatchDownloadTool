@@ -9,6 +9,8 @@
     polling: false,
     logLength: 0,
     galleryName: '',
+    galleryPlatform: '',
+    galleryLabel: '',
     galleryKind: 'image',
     galleryItems: [],      /* 当前博主的全部作品（图片 + 视频），切换标签复用 */
     galleryLoading: false,
@@ -240,76 +242,95 @@
     var box = $('bloggers');
     try {
       var data = await api('/api/bloggers');
-      $('bloggerHint').textContent = data.items.length + ' 位博主';
+      var groups = data.groups || [];
+      $('bloggerHint').textContent = (data.total || 0) + ' 位博主';
       box.innerHTML = '';
-      if (!data.items.length) {
+      if (!groups.length) {
         var empty = document.createElement('p');
         empty.className = 'empty';
         empty.textContent = '暂无博主，先导入数据并下载一次。';
         box.appendChild(empty);
         return;
       }
-      data.items.forEach(function (item) {
-        var row = document.createElement('div');
-        row.className = 'blogger';
-        row.dataset.name = item.name;
-        row.tabIndex = 0;
-        row.title = '点击预览「' + item.name + '」的作品（默认图片）';
-        if (state.galleryName === item.name) row.classList.add('active');
-        row.addEventListener('click', function () { openGallery(item.name); });
-        row.addEventListener('keydown', function (event) {
-          /* 行内按钮的按键不触发浏览，避免回车删除时顺带打开预览 */
-          if (event.target !== row) return;
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          openGallery(item.name);
+      groups.forEach(function (group) {
+        var head = document.createElement('div');
+        head.className = 'blogger-group';
+        head.textContent = group.label + ' · ' + group.items.length + ' 位';
+        box.appendChild(head);
+        group.items.forEach(function (item) {
+          box.appendChild(renderBloggerRow(group.platform, group.label, item));
         });
-
-        var name = document.createElement('div');
-        name.className = 'name';
-        name.textContent = item.name;
-        name.title = item.name;
-
-        var actions = document.createElement('div');
-        actions.className = 'actions';
-
-        var update = document.createElement('button');
-        update.className = 'ghost';
-        update.textContent = '更新';
-        if (item.homepage) {
-          /* 阻止冒泡，点更新不会顺带打开预览 */
-          update.addEventListener('click', function (event) {
-            event.stopPropagation();
-            updateBlogger(item.name);
-          });
-        } else {
-          update.disabled = true;
-          update.title = '缺少 homepage.txt，请重新粘贴该博主链接抓取一次以登记';
-        }
-
-        var remove = document.createElement('button');
-        remove.className = 'ghost danger';
-        remove.textContent = '删除';
-        remove.addEventListener('click', function (event) {
-          event.stopPropagation();
-          deleteBlogger(item.name);
-        });
-
-        actions.appendChild(update);
-        actions.appendChild(remove);
-
-        row.appendChild(name);
-        row.appendChild(actions);
-        box.appendChild(row);
       });
     } catch (error) {
       toast(error.message, true);
     }
   }
 
-  async function updateBlogger(name) {
+  function renderBloggerRow(platform, label, item) {
+    var row = document.createElement('div');
+    row.className = 'blogger';
+    row.dataset.name = item.name;
+    row.dataset.platform = platform;
+    row.tabIndex = 0;
+    row.title = '点击预览「' + item.name + '」的作品（默认图片）';
+    if (state.galleryPlatform === platform && state.galleryName === item.name) {
+      row.classList.add('active');
+    }
+    row.addEventListener('click', function () { openGallery(platform, label, item.name); });
+    row.addEventListener('keydown', function (event) {
+      /* 行内按钮的按键不触发浏览，避免回车删除时顺带打开预览 */
+      if (event.target !== row) return;
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      openGallery(platform, label, item.name);
+    });
+
+    var name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.name;
+    name.title = item.name;
+
+    var actions = document.createElement('div');
+    actions.className = 'actions';
+
+    var update = document.createElement('button');
+    update.className = 'ghost';
+    update.textContent = '更新';
+    if (item.homepage) {
+      /* 阻止冒泡，点更新不会顺带打开预览 */
+      update.addEventListener('click', function (event) {
+        event.stopPropagation();
+        updateBlogger(platform, item.name);
+      });
+    } else {
+      update.disabled = true;
+      update.title = '缺少 homepage.txt，请重新粘贴该博主链接抓取一次以登记';
+    }
+
+    var remove = document.createElement('button');
+    remove.className = 'ghost danger';
+    remove.textContent = '删除';
+    remove.addEventListener('click', function (event) {
+      event.stopPropagation();
+      deleteBlogger(platform, item.name);
+    });
+
+    actions.appendChild(update);
+    actions.appendChild(remove);
+
+    row.appendChild(name);
+    row.appendChild(actions);
+    return row;
+  }
+
+  function bloggerBase(platform, name) {
+    return '/api/bloggers/' + encodeURIComponent(platform) +
+      '/' + encodeURIComponent(name);
+  }
+
+  async function updateBlogger(platform, name) {
     try {
-      var data = await postJSON('/api/bloggers/' + encodeURIComponent(name) + '/update');
+      var data = await postJSON(bloggerBase(platform, name) + '/update');
       beginTask(data.task);
       toast('开始更新 ' + name + '，已下载的作品会自动跳过');
     } catch (error) {
@@ -317,11 +338,11 @@
     }
   }
 
-  async function deleteBlogger(name) {
+  async function deleteBlogger(platform, name) {
     if (!confirm('确定删除 <' + name + '> 及其全部已下载文件？')) return;
     try {
-      await api('/api/bloggers/' + encodeURIComponent(name), { method: 'DELETE' });
-      if (state.galleryName === name) hideGallery();
+      await api(bloggerBase(platform, name), { method: 'DELETE' });
+      if (state.galleryPlatform === platform && state.galleryName === name) hideGallery();
       toast('已删除 ' + name);
       loadBloggers();
     } catch (error) {
@@ -359,6 +380,8 @@
     box.classList.add('hidden');
     box.innerHTML = '';
     state.galleryName = '';
+    state.galleryPlatform = '';
+    state.galleryLabel = '';
     state.galleryKind = 'image';
     state.galleryItems = [];
     state.galleryLoading = false;
@@ -387,7 +410,10 @@
   function markActiveBlogger() {
     var rows = $('bloggers').querySelectorAll('.blogger');
     for (var i = 0; i < rows.length; i++) {
-      rows[i].classList.toggle('active', rows[i].dataset.name === state.galleryName);
+      rows[i].classList.toggle(
+        'active',
+        rows[i].dataset.name === state.galleryName &&
+        rows[i].dataset.platform === state.galleryPlatform);
     }
   }
 
@@ -399,7 +425,9 @@
   }
 
   /* 点击博主行：打开预览，每次默认回到图片 */
-  function openGallery(name) {
+  function openGallery(platform, label, name) {
+    state.galleryPlatform = platform;
+    state.galleryLabel = label || '';
     state.galleryName = name;
     state.galleryKind = 'image';
     state.galleryScroll = { image: 0, video: 0 };
@@ -432,18 +460,20 @@
 
   async function fetchGallery() {
     var name = state.galleryName;
-    if (!name) return;
+    var platform = state.galleryPlatform;
+    if (!name || !platform) return;
     var box = $('gallery');
     var token = ++galleryToken;
     state.galleryLoading = true;
     resetPosterPipeline();
     $('galleryRefresh').disabled = true;
     $('galleryRefresh').textContent = '刷新中…';
-    $('galleryTitle').textContent = name + ' · 加载中…';
+    $('galleryTitle').textContent = bloggerTitle() + ' · 加载中…';
     box.innerHTML = '<p class="hint">加载中…</p>';
     try {
-      var data = await api('/api/bloggers/' + encodeURIComponent(name) + '/files');
-      if (token !== galleryToken || state.galleryName !== name) return;
+      var data = await api(bloggerBase(platform, name) + '/files');
+      if (token !== galleryToken || state.galleryName !== name ||
+          state.galleryPlatform !== platform) return;
       state.galleryLoading = false;
       state.galleryItems = data.items || [];
       renderGallery();
@@ -458,6 +488,11 @@
       $('galleryRefresh').disabled = false;
       $('galleryRefresh').textContent = '刷新';
     }
+  }
+
+  /* 预览标题：带上平台名，避免不同平台同名博主混淆 */
+  function bloggerTitle() {
+    return (state.galleryLabel ? state.galleryLabel + ' · ' : '') + state.galleryName;
   }
 
   /* 媒体 URL 带上文件 mtime 作为版本号：文件被覆盖后不会命中旧缓存 */
@@ -478,7 +513,7 @@
     /* 重建列表时中止未完成的取帧任务 */
     resetPosterPipeline();
     resetThumbObserver();
-    $('galleryTitle').textContent = state.galleryName + ' · ' + label + ' ' + items.length + ' 个';
+    $('galleryTitle').textContent = bloggerTitle() + ' · ' + label + ' ' + items.length + ' 个';
 
     if (!items.length) {
       var empty = document.createElement('p');

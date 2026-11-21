@@ -4,10 +4,10 @@
 包含文件读写、编码处理、通用工具函数
 """
 
-import sys
-import re
 import os
+import re
 import shutil
+import sys
 
 ENCODING = 'utf-8'
 
@@ -61,6 +61,18 @@ def rm_dir(dir_path):
 
 
 def safe_name(name):
-    """剔除不符合 Windows 文件夹名的字符：\\/:*?"<>|"""
-    name = re.sub(r'[\\/:*?"<>|\r\n\t]', '', name)
-    return name.strip().rstrip('.').strip()
+    """剔除不符合 Windows 文件夹名的字符：\\/:*?"<>| 与首尾空白、结尾点"""
+    return re.sub(r'[\\/:*?"<>|\r\n\t]', '', name or '').strip().rstrip('.').strip()
+
+
+def human_size(size):
+    """字节数转成便于阅读的单位，用于日志（保留两位小数）"""
+    try:
+        size = float(size)
+    except (TypeError, ValueError):
+        return '0 B'
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if size < 1024 or unit == 'GB':
+            return ('{:.0f} {}' if unit == 'B' else '{:.2f} {}').format(size, unit)
+        size /= 1024.0
+    return '{:.2f} GB'.format(size)

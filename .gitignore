@@ -1,9 +1,41 @@
+# ---- Python ----
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# ---- 虚拟环境 ----
+/.venv/
+venv/
+env/
+
+# ---- 配置与密钥 ----
 /settings.json
-# 抓取用的浏览器用户数据目录（含登录态，体积大）
+.env
+.env.*
+
+# ---- 抓取用的浏览器用户数据目录（含登录态，体积大）----
 /.pw_profile/
-# 抓取产物
+/.pw_profile_xhs/
+
+# ---- 抓取产物 ----
 /scrape_output/
-# CodeBuddy 工作数据（计划等），不入库
+/logs/
+*.log
+
+# ---- 工具缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- CodeBuddy 工作数据（计划等），不入库 ----
 /.codebuddy/
