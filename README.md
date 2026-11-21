@@ -31,7 +31,7 @@ douyin/
 │   ├── store.py               # 博主目录、去重记录、主页链接
 │   ├── naming.py              # 时间格式与落盘命名
 │   ├── browser.py             # 通用浏览器能力（启动、滚动、登录等待）
-│   ├── downloader.py          # 单个地址下载（重试、清理、.part 定名）
+│   ├── downloader.py          # 单个地址下载（重试、清理、.part 定名）+ 并发调度
 │   └── utils.py               # 工具函数
 ├── platforms/                 # 平台实现层（每个平台一份抓取 / 工具 / 下载）
 │   ├── base.py                # 平台接口约定
@@ -108,7 +108,7 @@ python web_app.py
 - 登录态按平台隔离：抖音在 `.pw_profile/`、小红在 `.pw_profile_xhs/`（可用 `conf/config.ini` 对应平台段的 `profile_dir` 改），**每个平台只需扫码登录一次**，之后无头运行即可
 - 首次使用或登录失效时，程序会等待最多 `wait_login_seconds` 秒（默认 180），期间在弹出的浏览器窗口里扫码即可
 - 「最近一个月」会在翻到时间边界时提前停止，不必抓完全部作品
-- 同一时刻只允许一个任务；抓取与下载在同一个任务里串行完成
+- 同一时刻只允许一个任务；抓取与下载在同一个任务里先后完成（下载阶段内部多地址并发）
 - 未知 `aweme_type` 的作品会被跳过并在日志中提示，需要下载时把它加进 `conf/config.ini` 的 `[platforms.douyin]` 下 `image_types` / `video_types` 后重跑
 
 ### 小红书说明
@@ -135,6 +135,7 @@ python web_app.py
 download_dir = download/            # 下载根目录，不存在会自动创建；相对路径按启动时的工作目录解析
 timeout = 30                        # 下载超时（秒）
 max_retry = 3                       # 失败重试次数
+workers = 4                         # 同时下载的 URL 数；1 表示逐个下载，过大会被 CDN 限流
 
 [network]
 verify_ssl = false                  # false 表示忽略证书校验
@@ -210,7 +211,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `core/store.py` | 博主目录、去重记录、主页链接（无全局路径态） |
 | `core/naming.py` | 时间格式与落盘命名 |
 | `core/browser.py` | 通用浏览器能力（上下文、滚动、登录等待、响应解析） |
-| `core/downloader.py` | 单个地址下载：重试、清理半成品、`.part` 扩展名探测 |
+| `core/downloader.py` | 单个地址下载（重试、清理半成品、`.part` 扩展名探测）与批量并发调度 `fetch_all` |
 | `platforms/base.py` | 平台接口约定（match / parse_target / scrape / download / headers / options） |
 | `platforms/douyin/` | 抖音：链接解析、列表采集、类型判定、挑条目、取地址、命名落盘 |
 | `platforms/xiaohongshu/` | 小红书：首屏 SSR + 接口分页、逐条取详情、图文/视频判定、去水印、HEIC 转 JPG、下载流程 |
@@ -226,23 +227,25 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 1. `platform.scrape(target, options)` —— 平台开浏览器翻页，结果全量累加后一次性返回（抖音是接口 JSON 列表，小红书是逐条补齐的详情列表）
 2. `platform.download(result, store)` —— 平台从自己返回的结构里挑出可下载条目，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.webp` 落盘；一条里的全部媒体都成功才把 ID 写入 `aweme_id.txt`
 
+并发只发生在第 2 步内部：平台先算出全部落盘路径，再把这些地址交给线程池（`[download] workers`，默认 4，1 表示逐个下载），结果回到主线程聚合，一条作品的媒体全部回来才计进度、才记 ID。
+
 分工边界：
 
 | 层 | 负责 |
 |---|---|
 | 平台 `download()` | 挑哪些条目、怎么取地址、怎么命名、何时记 ID、进度怎么报 |
-| `core/downloader.py` | 只把「一个 URL + 一个目标路径」拉成文件，含重试与扩展名定名 |
+| `core/downloader.py` | 把「一个 URL + 一个目标路径」拉成文件（重试与扩展名定名），并提供批量并发调度 |
 | `core/task.py` | 收 `done` / `total` 换算百分比，维护日志、失败清单、取消状态 |
 | `core/pipeline.py` | 串联两阶段，处理取消与「没有可下载内容」的收尾 |
 
-进度只有一种粒度：**已处理条数 / 总条数**。单个文件下载过程不上报进度，每条结束时计数一次。
+进度只有一种粒度：**已处理条数 / 总条数**。单个文件下载过程不上报进度，一条作品的媒体全部回来时计数一次（并发下按完成顺序计数）。
 
 ## 注意事项
 
 1. **文件编码**：`homepage.txt`、`aweme_id.txt` 均按 UTF-8 读写
 2. **数据时效性**：抖音 API 数据具有时效性，建议获取后尽快下载
 3. **登录状态**：确保抖音账号已登录，否则可能无法获取完整数据
-4. **下载频率**：大量下载时建议适当增加延时，避免触发风控
+4. **下载频率**：默认同时下载 4 个地址；被 CDN 限流时把 `[download] workers` 调小（1 即逐个下载），避免触发风控
 5. **存储空间**：视频文件较大，请确保目标磁盘空间充足
 
 ## 免责声明

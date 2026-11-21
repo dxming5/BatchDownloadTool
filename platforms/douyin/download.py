@@ -112,10 +112,12 @@ def collect(result):
 def download(result, store, on_progress=None, should_stop=None,
              media_label=ID_RECORD_LABEL):
     """
-    逐条下载抖音作品，进度只报「已处理条数 / 总条数」
+    并发下载抖音作品，进度只报「已处理条数 / 总条数」
 
-    一次任务只有一个博主：collect 已滤掉作者不一致的作品，
-    这里顺序遍历一遍，ID 每满 ID_FLUSH_BATCH 条落盘一次，结束时再补一次。
+    一次任务只有一个博主：collect 已滤掉作者不一致的作品。
+    先由主线程挑出要下载的作品并算好落盘路径（建目录只在这一步做），
+    再交给线程池并发拉取；结果回到主线程聚合，一条作品的媒体全部成功
+    才计进度并记 ID，ID 每满 ID_FLUSH_BATCH 条落盘一次，结束时再补一次。
     """
     entries, unknown, dropped = collect(result)
     total = len(entries)
@@ -123,6 +125,7 @@ def download(result, store, on_progress=None, should_stop=None,
     failures = []
     request_headers = headers()
     no_time_total = 0
+    workers = settings.DOWNLOAD_WORKERS
 
     def cancelled():
         return bool(should_stop and should_stop())
@@ -173,6 +176,8 @@ def download(result, store, on_progress=None, should_stop=None,
 
     written = {}        # 本次运行内 目标路径 -> 条目 ID，仅用于撞名提示
     new_ids = []
+    pending = {}        # 条目 ID -> 剩余地址数 / 是否全部成功 / 最后落盘文件
+    jobs = []           # (条目 ID, 地址, 目标路径)，交给线程池并发拉取
 
     def flush_ids():
         """把缓冲中的 ID 落盘并清空；失败向上抛，由任务层报错"""
@@ -181,6 +186,8 @@ def download(result, store, on_progress=None, should_stop=None,
         store.append_ids(author, new_ids)
         del new_ids[:]
 
+    # ---------------- 主线程：挑条目、算路径 ----------------
+    # 建目录与撞名判断都只在这里做，线程池只管下载本身
     for entry in entries:
         if cancelled():
             state['stopped'] = True
@@ -211,20 +218,9 @@ def download(result, store, on_progress=None, should_stop=None,
                    create_time=create_time)
             continue
 
-        # 只报真正要下载的作品：已下载、缺发布时间、无可用地址的都在上方 continue 掉了
-        notice('下载 {}'.format(create_time))
-
-        all_ok = True
-        final_path = ''
-
+        # 扩展名未知时先落 .part，下载完成后改名
+        ext = entry['ext'] or downloader.PART_EXT
         for index, url in enumerate(urls):
-            if cancelled():
-                state['stopped'] = True
-                all_ok = False
-                break
-
-            # 扩展名未知时先落 .part，下载完成后改名
-            ext = entry['ext'] or downloader.PART_EXT
             target = naming.target_path(blogger_dir, entry['kind'],
                                         create_time, index, ext)
             owner = written.get(target)
@@ -232,26 +228,49 @@ def download(result, store, on_progress=None, should_stop=None,
                 notice('文件名冲突：{} 已属于 {}，本次将被 {} 覆盖'.format(
                     os.path.basename(target), owner, item_id))
             written[target] = item_id
+            jobs.append((item_id, url, target))
 
-            ok, final_path, error = downloader.fetch_media(
-                url, target, request_headers)
-            if not ok:
-                failures.append({'url': url, 'file': os.path.basename(target),
-                                 'error': error})
-                all_ok = False
+        pending[item_id] = {'entry': entry, 'create_time': create_time,
+                            'remaining': len(urls), 'ok': True, 'file': ''}
 
-        # 取消发生在条内：这一条不算完成，直接结束
-        if state['stopped']:
+    # ---------------- 线程池：并发拉取，结果回主线程聚合 ----------------
+    if state['stopped']:
+        jobs = []       # 挑选阶段已取消：一个地址都不提交
+    elif jobs:
+        notice('开始下载 {} 条作品（并发 {}，共 {} 个地址）'.format(
+            len(pending), min(workers, len(jobs)), len(jobs)))
+
+    for item_id, url, target, ok, final_path, error in downloader.fetch_all(
+            jobs, request_headers, workers, cancelled):
+        item = pending.get(item_id)
+        if not item:
+            continue
+
+        # 取消后不再处理结果：已落盘的 ID 由下方 flush 写掉，这条不记录
+        if cancelled():
+            state['stopped'] = True
             break
 
-        if all_ok:
+        if ok:
+            item['file'] = os.path.basename(final_path or '')
+        else:
+            failures.append({'url': url, 'file': os.path.basename(target),
+                             'error': error})
+            item['ok'] = False
+
+        # 一条作品的媒体全部回来才计进度；全成功才记 ID
+        item['remaining'] -= 1
+        if item['remaining'] > 0:
+            continue
+
+        if item['ok']:
             new_ids.append(item_id)
             done_ids.add(item_id)
             if len(new_ids) >= ID_FLUSH_BATCH:
                 flush_ids()
 
-        report(entry, all_ok, create_time=create_time,
-               file_name=os.path.basename(final_path or ''))
+        report(item['entry'], item['ok'], create_time=item['create_time'],
+               file_name=item['file'])
 
     # 余数与取消时的兜底：把还没落盘的 ID 写掉
     flush_ids()

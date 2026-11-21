@@ -50,6 +50,8 @@ _parser.read(_locate_config(), encoding='utf-8')
 CONFIGURED_DOWNLOAD_DIR = _parser.get('download', 'download_dir', fallback='download/')
 DOWNLOAD_TIMEOUT = _parser.getint('download', 'timeout', fallback=30)
 MAX_RETRY = _parser.getint('download', 'max_retry', fallback=3)
+# 同时下载的 URL 数；配错或为 1 时按 1 处理（即逐个下载），上限 16
+DOWNLOAD_WORKERS = min(max(1, _parser.getint('download', 'workers', fallback=4)), 16)
 
 
 # ---------------- 网络 ----------------
