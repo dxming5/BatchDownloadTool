@@ -53,6 +53,37 @@
     toastTimer = setTimeout(function () { box.className = 'toast hidden'; }, 3200);
   }
 
+  /* ---------------- 确认框 ---------------- */
+
+  var confirmResolver = null;
+
+  /* 页内确认框，替代原生 confirm：resolve(true/false) */
+  function confirmDialog(message) {
+    return new Promise(function (resolve) {
+      confirmResolver = resolve;
+      $('confirmText').textContent = message;
+      $('confirmModal').classList.remove('hidden');
+      $('confirmOk').focus();
+    });
+  }
+
+  function isConfirmOpen() {
+    return !$('confirmModal').classList.contains('hidden');
+  }
+
+  function closeConfirm(result) {
+    var resolve = confirmResolver;
+    confirmResolver = null;
+    $('confirmModal').classList.add('hidden');
+    if (resolve) resolve(result);
+  }
+
+  function onConfirmKey(event) {
+    if (!isConfirmOpen() || event.key !== 'Escape') return;
+    event.preventDefault();
+    closeConfirm(false);
+  }
+
   /* ---------------- 状态 ---------------- */
 
   async function refreshStatus() {
@@ -218,6 +249,8 @@
     state.taskId = null;
     $('cancelBtn').disabled = true;
     $('scrapeBtn').disabled = !state.scrapeReady || !!state.batch;
+    /* 任务结束后立刻按最新状态恢复「更新」按钮，否则会一直停留在禁用态 */
+    syncUpdateBtn();
 
     /* 批量：一条跑完接着下一条，提示与列表刷新留到整批结束 */
     if (state.batch) {
@@ -408,6 +441,8 @@
     var update = document.createElement('button');
     update.className = 'ghost';
     update.textContent = '更新';
+    /* 空 title 阻止继承整行的预览提示，按钮本身不显示提示 */
+    update.title = '';
     if (item.homepage) {
       /* 阻止冒泡，点更新不会顺带打开预览 */
       update.addEventListener('click', function (event) {
@@ -416,12 +451,12 @@
       });
     } else {
       update.disabled = true;
-      update.title = '缺少 homepage.txt，请重新粘贴该博主链接抓取一次以登记';
     }
 
     var remove = document.createElement('button');
     remove.className = 'ghost danger';
     remove.textContent = '删除';
+    remove.title = '';
     remove.addEventListener('click', function (event) {
       event.stopPropagation();
       deleteBlogger(platform, item.name);
@@ -465,7 +500,7 @@
   /* ---------------- 批量更新（前端串行调用单博主更新） ---------------- */
 
   /* 点「更新」：把下拉框所选平台下登记过主页链接的博主排成队列，逐个更新 */
-  function startBatchUpdate() {
+  async function startBatchUpdate() {
     if (state.batch) return;
     if (state.taskId) {
       toast('已有任务在执行，请等待或先取消', true);
@@ -488,8 +523,10 @@
       return;
     }
     var label = platform ? platformLabel(platform) : '全部平台';
-    if (!confirm('确定更新「' + label + '」下的 ' + queue.length +
-                 ' 位博主？已下载的作品会自动跳过。')) return;
+    var ok = await confirmDialog('确定更新「' + label + '」下的 ' +
+                                 queue.length + ' 位博主？');
+    /* 确认期间可能已经开始别的任务，再判一次 */
+    if (!ok || state.batch || state.taskId) return;
 
     state.batch = {
       mode: 'update', queue: queue, total: queue.length, index: 0,
@@ -1110,6 +1147,13 @@
 
   function bind() {
     $('scrapeBtn').addEventListener('click', startScrape);
+    $('confirmOk').addEventListener('click', function () { closeConfirm(true); });
+    $('confirmCancel').addEventListener('click', function () { closeConfirm(false); });
+    /* 点遮罩空白处等同取消 */
+    $('confirmModal').addEventListener('mousedown', function (event) {
+      if (event.target === $('confirmModal')) closeConfirm(false);
+    });
+    document.addEventListener('keydown', onConfirmKey);
     /* 多行输入框里回车要能换行，提交改用 Ctrl/⌘ + Enter */
     $('userUrl').addEventListener('keydown', function (event) {
       if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {

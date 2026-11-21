@@ -53,8 +53,7 @@ https://www.xiaohongshu.com/user/profile/xxxxxxxx"></textarea>
           <div class="row tight">
             <select id="platformFilter" class="select select-sm"
                     title="按平台筛选博主"></select>
-            <button id="updateAllBtn" class="ghost"
-                    title="更新所选平台下的全部博主，已下载的作品会自动跳过">更新</button>
+            <button id="updateAllBtn" class="ghost">更新</button>
             <button id="refreshBtn" class="ghost">刷新</button>
           </div>
         </div>
@@ -96,6 +95,16 @@ https://www.xiaohongshu.com/user/profile/xxxxxxxx"></textarea>
         <span id="lbCounter"></span>
       </div>
       <span id="lbCaption" class="mono"></span>
+    </div>
+  </div>
+
+  <div id="confirmModal" class="modal hidden">
+    <div class="modal-panel">
+      <p id="confirmText" class="modal-text"></p>
+      <div class="modal-actions">
+        <button id="confirmCancel" class="ghost">取消</button>
+        <button id="confirmOk" class="primary">确定</button>
+      </div>
     </div>
   </div>
 

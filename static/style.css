@@ -801,6 +801,42 @@ body.no-scroll {
   color: #ffc9c9;
 }
 
+/* ---------- 确认框 ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 75;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(6, 8, 12, .6);
+  backdrop-filter: blur(2px);
+}
+
+.modal-panel {
+  width: min(340px, 100%);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, .5);
+}
+
+.modal-text {
+  margin: 0 0 18px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 /* 窄屏回到单列 + 整页滚动：下载 → 博主 → 预览 */
 @media (max-width: 1000px) {
   body {
