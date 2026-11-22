@@ -30,8 +30,6 @@ class Task(object):
         self.current = ''
         self.video_total = 0
         self.picture_total = 0
-        self.video_items = 0
-        self.picture_items = 0
         self.scrape_pages = 0
         self.scrape_count = 0
         self.unknown_types = {}
@@ -81,8 +79,6 @@ class Task(object):
             elif stage == 'start':
                 self.video_total = event.get('video_total', 0)
                 self.picture_total = event.get('picture_total', 0)
-                self.video_items = event.get('video_items', 0)
-                self.picture_items = event.get('picture_items', 0)
                 self.logs.append('开始下载 {} <{}>'.format(
                     self.platform_label, self.blogger))
             elif stage == 'notice':
@@ -111,7 +107,7 @@ class Task(object):
                 self.unknown_types = event.get('unknown_types') or {}
                 self.status = 'cancelled' if event.get('stopped') else 'done'
                 self.current = ''
-                self.logs.append('任务结束，共处理 {}/{} 篇，失败 {} 个'.format(
+                self.logs.append('任务结束，共处理 {}/{} 个文件，失败 {} 个'.format(
                     self.done, self.total, len(self.failures)))
                 if self.unknown_types:
                     self.logs.append('跳过未知 aweme_type：{}'.format(
@@ -152,8 +148,6 @@ class Task(object):
                 'current': self.current,
                 'video_total': self.video_total,
                 'picture_total': self.picture_total,
-                'video_items': self.video_items,
-                'picture_items': self.picture_items,
                 'unknown_types': dict(self.unknown_types),
                 'logs': list(self.logs),
                 'failures': list(self.failures),

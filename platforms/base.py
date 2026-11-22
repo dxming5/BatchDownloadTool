@@ -47,9 +47,9 @@ class Platform(object):
                  media_label=''):
         """这批内容怎么下载：挑哪些、地址怎么取由平台决定
 
-        进度必须按「篇」上报（抖音作品 / 小红书笔记 / 微博单条）：
-        一篇内的全部媒体处理完才计 1 篇，不要把图片张数或 URL 条数当 total。
-        ID 同样按篇记录：一篇的全部媒体成功才写入 aweme_id.txt。
+        把条目整理成 (篇 ID, 发布时间, [地址]) 交给 downloader.fetch_all，
+        由下载层统一校验去重、命名落盘、并发下载与按地址计进度；
+        平台只按篇聚合结果，一篇全部成功才把 ID 写入 aweme_id.txt。
         """
         raise NotImplementedError
 

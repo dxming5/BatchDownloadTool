@@ -19,8 +19,6 @@ KEY = 'xiaohongshu'
 
 ID_RECORD_LABEL = '小红书笔记'
 
-ID_FLUSH_BATCH = 20      # 每积累多少个 ID 落盘一次
-
 # HEIC 解码依赖：未安装 pillow-heif 时跳过转码，保留原文件
 try:
     from PIL import Image
@@ -150,17 +148,17 @@ def collect(result):
 def download(result, store, on_progress=None, should_stop=None,
              media_label=ID_RECORD_LABEL):
     """
-    并发下载小红书笔记，进度只报「已处理条数 / 总条数」
+    并发下载小红书笔记，进度按实际媒体地址数统计
 
     一次任务只有一个博主：collect 已滤掉作者不一致的笔记。
     先由主线程挑出要下载的笔记并算好落盘路径（建目录只在这一步做），
     再交给线程池并发拉取，HEIC 转 JPG 也在下载线程里做；
-    结果回到主线程聚合，一条笔记的媒体全部成功才计进度并记 ID。
+    每个文件完成即计 1 个进度，记 ID 由下载层按篇聚合。
     图片地址不带后缀，走 .part 探测扩展名。
     """
     entries, unknown, dropped = collect(result)
-    total = len(entries)
-    state = {'done': 0, 'stopped': False}
+    total = len(entries)    # 篇数，仅交给编排层判断「有没有可下载内容」
+    state = {'done': 0, 'total': 0, 'stopped': False}
     failures = []
     request_headers = headers()
     no_time_total = 0
@@ -181,12 +179,17 @@ def download(result, store, on_progress=None, should_stop=None,
     def notice(message):
         notify({'stage': 'notice', 'message': message})
 
+    def progress(done, total_urls):
+        """fetch_all 每个地址完成后的进度回调：只发事件，不写日志"""
+        state['done'] = done
+        state['total'] = total_urls
+        notify({'stage': 'notice', 'done': done, 'total': total_urls})
+
     def report(entry, ok, skipped=False, reason='', create_time='', file_name=''):
-        """一条处理完：累加计数后连同 done/total 一起上报"""
-        state['done'] = min(state['done'] + 1, total)
-        notify({'stage': 'item', 'done': state['done'], 'total': total,
-                'aweme_id': entry['id'], 'create_time': create_time,
-                'file': file_name, 'skipped': skipped, 'ok': ok, 'reason': reason})
+        """一条处理完：只上报条目事件，进度由 fetch_all 统一负责"""
+        notify({'stage': 'item', 'aweme_id': entry['id'],
+                'create_time': create_time, 'file': file_name,
+                'skipped': skipped, 'ok': ok, 'reason': reason})
 
     if dropped:
         notice('跳过 {} 篇作者与目标博主不一致的笔记：{}'.format(
@@ -210,23 +213,12 @@ def download(result, store, on_progress=None, should_stop=None,
     video_total = sum(1 for entry in entries if entry['kind'] == 'video')
     image_total = sum(1 for entry in entries if entry['kind'] == 'image')
     notify({'stage': 'start', 'blogger': author,
-            'video_total': video_total, 'picture_total': image_total,
-            'video_items': video_total, 'picture_items': image_total})
+            'video_total': video_total, 'picture_total': image_total})
 
-    written = {}        # 本次运行内 目标路径 -> 条目 ID，仅用于撞名提示
-    new_ids = []
-    pending = {}        # 条目 ID -> 剩余地址数 / 是否全部成功 / 最后落盘文件
-    jobs = []           # (条目 ID, 地址, 目标路径)，交给线程池并发拉取
+    jobs = []           # (条目 ID, 发布时间, [地址])，交给统一下载层
 
-    def flush_ids():
-        """把缓冲中的 ID 落盘并清空；失败向上抛，由任务层报错"""
-        if not new_ids:
-            return
-        store.append_ids(author, new_ids)
-        del new_ids[:]
-
-    # ---------------- 主线程：挑条目、算路径 ----------------
-    # 建目录与撞名判断都只在这里做，线程池只管下载本身
+    # ---------------- 主线程：挑条目、算发布时间 ----------------
+    # 命名与撞名判断都交给统一下载层，这里只挑条目、算时间、记归属
     for entry in entries:
         if cancelled():
             state['stopped'] = True
@@ -234,12 +226,6 @@ def download(result, store, on_progress=None, should_stop=None,
 
         item_id = entry['id']
         create_time = naming.format_create_time(entry['create_time'])
-
-        # 已下载过：跳过，但仍计入进度
-        if item_id in done_ids:
-            report(entry, True, skipped=True, reason='done',
-                   create_time=create_time or '')
-            continue
 
         # 没有发布时间就无法命名，跳过且不记录
         if not create_time:
@@ -257,76 +243,49 @@ def download(result, store, on_progress=None, should_stop=None,
                    create_time=create_time)
             continue
 
-        # 只报真正要下载的笔记：已下载、缺发布时间、无可用地址的都在上方 continue 掉了
-        # 并发下载下这条表示「已提交下载」，不代表此刻正在拉取
-        notice('下载 {}'.format(create_time))
-
-        # 扩展名未知时先落 .part，下载完成后改名
-        ext = entry['ext'] or downloader.PART_EXT
-        for index, url in enumerate(urls):
-            target = naming.target_path(blogger_dir, entry['kind'],
-                                        create_time, index, ext)
-            owner = written.get(target)
-            if owner and owner != item_id:
-                notice('文件名冲突：{} 已属于 {}，本次将被 {} 覆盖'.format(
-                    os.path.basename(target), owner, item_id))
-            written[target] = item_id
-            jobs.append((item_id, url, target))
-
-        pending[item_id] = {'entry': entry, 'create_time': create_time,
-                            'remaining': len(urls), 'ok': True, 'file': ''}
+        # 已下载的篇也照常进 jobs，由 fetch_all 统一校验跳过并计入进度
+        jobs.append((item_id, create_time, urls))
 
     # ---------------- 线程池：并发拉取，结果回主线程聚合 ----------------
     if state['stopped']:
         jobs = []       # 挑选阶段已取消：一个地址都不提交
 
-    for item_id, url, target, ok, final_path, error in downloader.fetch_all(
-            jobs, request_headers, workers, cancelled, finish=post_process):
-        item = pending.get(item_id)
-        if not item:
-            continue
+    entry_by_id = {entry['id']: entry for entry in entries}
 
-        # 取消后不再处理结果：已落盘的 ID 由下方 flush 写掉，这条不记录
+    def record_ids(batch):
+        store.append_ids(author, batch)
+
+    def article_done(item_id, ok, create_time, file_name):
+        report(entry_by_id[item_id], ok, create_time=create_time,
+               file_name=file_name)
+
+    for item_id, url, target, ok, final_path, error in downloader.fetch_all(
+            jobs, blogger_dir, request_headers, workers, cancelled,
+            finish=post_process, log=notice, done_ids=done_ids, on_done=progress,
+            record_ids=record_ids, on_article_done=article_done):
+        # 取消后不再处理结果：已成功篇的 ID 由下载层 finally 兜底写出
         if cancelled():
             state['stopped'] = True
             break
 
-        if ok:
-            item['file'] = os.path.basename(final_path or '')
-            # 小红书专有：HEIC 转 JPG 在下载线程里做，失败时只提示不判失败
-            if error:
-                notice('落盘后处理失败（{}）：{}'.format(item['file'], error))
-        else:
+        if not ok:
             failures.append({'url': url, 'file': os.path.basename(target),
                              'error': error})
-            item['ok'] = False
-
-        # 一条笔记的媒体全部回来才计进度；全成功才记 ID
-        item['remaining'] -= 1
-        if item['remaining'] > 0:
-            continue
-
-        if item['ok']:
-            new_ids.append(item_id)
-            done_ids.add(item_id)
-            if len(new_ids) >= ID_FLUSH_BATCH:
-                flush_ids()
-
-        report(item['entry'], item['ok'], create_time=item['create_time'],
-               file_name=item['file'])
-
-    # 余数与取消时的兜底：把还没落盘的 ID 写掉
-    flush_ids()
+        elif error:
+            # 小红书专有：HEIC 转 JPG 在下载线程里做，失败时只提示不判失败
+            notice('落盘后处理失败（{}）：{}'.format(
+                os.path.basename(final_path or ''), error))
 
     if no_time_total:
         notice('跳过 {} 篇缺少发布时间、无法命名的笔记'.format(no_time_total))
 
     notify({'stage': 'finished', 'blogger': '全部',
-            'done': state['done'], 'total': total,
+            'done': state['done'], 'total': state['total'],
             'failures': failures,
             'stopped': state['stopped'] or cancelled(),
             'unknown_types': {}})
 
+    # 返回给编排层的 total 仍是篇数，只用于判断「有没有可下载内容」
     return {'done': state['done'], 'total': total,
             'stopped': state['stopped'], 'failures': failures,
             'unknown_types': unknown}

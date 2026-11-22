@@ -295,9 +295,8 @@
     var percent = scraping ? 0 : (task.percent || 0);
     $('bar').style.width = percent + '%';
 
-    /* 条上文字只表示这条进度；还没有总量（如抓取阶段）时显示 0%（0/0） */
-    var prefix = state.batch ? '[' + state.batch.index + '/' + state.batch.total + '] ' : '';
-    $('progressText').textContent = prefix + percent + '%（' +
+    /* 条上文字只表示当前任务的进度；还没有总量（如抓取阶段）时显示 0%（0/0） */
+    $('progressText').textContent = percent + '%（' +
       (task.done || 0) + '/' + (task.total || 0) + '）';
 
     /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
