@@ -26,7 +26,6 @@ class Task(object):
         self.percent = 0
         self.done = 0
         self.total = 0
-        self.media_type = ''
         self.current = ''
         self.video_total = 0
         self.picture_total = 0
@@ -86,20 +85,13 @@ class Task(object):
                 if message:
                     self.logs.append(message)
             elif stage == 'item':
-                self.media_type = event.get('media_type', self.media_type)
                 reason = event.get('reason')
-                if reason == 'unknown_type':
-                    self.logs.append('    跳过：未知 aweme_type={}（aweme_id={}）'.format(
-                        event.get('aweme_type'), event.get('aweme_id')))
-                elif reason == 'no_time':
+                if reason == 'no_time':
                     self.logs.append('    跳过：缺少发布时间（aweme_id={}）'.format(
                         event.get('aweme_id')))
                 elif reason == 'no_media':
                     self.logs.append('    跳过：没有可下载的媒体地址（aweme_id={}）'.format(
                         event.get('aweme_id')))
-                elif reason == 'done':
-                    # 已下载的作品数量可能很大，不逐条写日志
-                    pass
                 elif not event.get('ok'):
                     self.logs.append('    失败：{}'.format(event.get('file', '')))
             elif stage == 'finished':
@@ -117,11 +109,6 @@ class Task(object):
     def mark(self, status, message=''):
         with self._lock:
             self.status = status
-            if message:
-                self.logs.append(message)
-
-    def add_log(self, message):
-        with self._lock:
             if message:
                 self.logs.append(message)
 
@@ -144,7 +131,6 @@ class Task(object):
                 'percent': self.percent,
                 'done': self.done,
                 'total': self.total,
-                'media_type': self.media_type,
                 'current': self.current,
                 'video_total': self.video_total,
                 'picture_total': self.picture_total,

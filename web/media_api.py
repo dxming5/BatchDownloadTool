@@ -10,12 +10,18 @@ import os
 
 from flask import abort, send_file
 
-from web.media_cache import cover_path, make_thumb
+from core.downloader import (
+    IMAGE_ALIASES,
+    VIDEO_ALIASES,
+    IMAGE_EXTS as _IMAGE_EXTS,
+    VIDEO_EXTS as _VIDEO_EXTS,
+)
+from web.media_cache import make_thumb
 
-# 浏览范围：抖音产出 jpg/png/webp/mp4；小红书还会产出 avif/gif，
-# 未装 pillow-heif 时可能残留 heic（前端不一定能显示，但至少要列出来）
-IMAGE_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.heic', '.heif')
-VIDEO_EXTS = ('.mp4',)
+# 浏览范围与下载层共用同一份后缀清单，别名（jpeg / tiff 等）一并列出，
+# 历史文件也能预览；带点前缀是给 os.path.splitext / endswith 用的
+IMAGE_EXTS = tuple('.' + ext for ext in _IMAGE_EXTS + tuple(IMAGE_ALIASES))
+VIDEO_EXTS = tuple('.' + ext for ext in _VIDEO_EXTS + tuple(VIDEO_ALIASES))
 MEDIA_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 
@@ -47,9 +53,3 @@ def media_response(root, rel_path, thumb=None):
             pass
 
     return send_file(target, conditional=True)
-
-
-def cover_rel_path(root, target, mtime=None):
-    """视频封面在下载根下的相对路径，供接口拼 URL"""
-    cover = cover_path(root, target, mtime)
-    return os.path.relpath(cover, os.path.realpath(root)).replace('\\', '/')

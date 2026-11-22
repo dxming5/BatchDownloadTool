@@ -23,26 +23,51 @@ from urllib import request
 from urllib.parse import urlparse
 
 from conf import settings
-from core import naming
 from core.store import PICTURE_DIR_NAME
 
-# ---------------- 扩展名识别 ----------------
+# ---------------- 扩展名 ----------------
 
+# 图片后缀：落盘进 picture/，同时作为媒体列表的白名单来源
+IMAGE_EXTS = ('jpg', 'png', 'webp', 'gif', 'avif', 'heic', 'heif',
+              'bmp', 'tif', 'ico')
+# 视频后缀：落盘在博主目录根
+VIDEO_EXTS = ('mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'flv', 'wmv',
+              'ts', '3gp', 'mpg')
+
+# 同一格式的别名：URL 后缀识别时统一成标准后缀
+IMAGE_ALIASES = {'jpeg': 'jpg', 'tiff': 'tif'}
+VIDEO_ALIASES = {'mpeg': 'mpg', 'mpe': 'mpg'}
+
+# 响应头、文件头、URL 后缀都识别不出时的兜底
+FALLBACK_EXT = 'webp'
+
+# 响应头 Content-Type → 扩展名
 EXT_BY_TYPE = {
-    'image/webp': 'webp',
     'image/jpeg': 'jpg',
     'image/jpg': 'jpg',
     'image/png': 'png',
-    'image/avif': 'avif',
+    'image/webp': 'webp',
     'image/gif': 'gif',
+    'image/avif': 'avif',
     'image/heic': 'heic',
     'image/heif': 'heif',
+    'image/bmp': 'bmp',
+    'image/x-ms-bmp': 'bmp',
+    'image/tiff': 'tif',
+    'image/x-icon': 'ico',
+    'image/vnd.microsoft.icon': 'ico',
     'video/mp4': 'mp4',
     'video/quicktime': 'mov',
     'video/x-m4v': 'm4v',
+    'video/webm': 'webm',
+    'video/x-matroska': 'mkv',
+    'video/x-msvideo': 'avi',
+    'video/x-flv': 'flv',
+    'video/x-ms-wmv': 'wmv',
+    'video/mp2t': 'ts',
+    'video/3gpp': '3gp',
+    'video/mpeg': 'mpg',
 }
-
-VIDEO_EXTS = ('mp4', 'mov', 'm4v')
 
 PART_EXT = 'part'
 
@@ -51,7 +76,7 @@ def detect_media_ext(path):
     """按文件头识别真实格式；识别不出返回空串"""
     try:
         with open(path, 'rb') as handle:
-            head = handle.read(12)
+            head = handle.read(256)
     except OSError:
         return ''
     if head[:3] == b'\xff\xd8\xff':
@@ -60,14 +85,34 @@ def detect_media_ext(path):
         return 'png'
     if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
         return 'webp'
+    if head[:4] == b'RIFF' and head[8:12] == b'AVI ':
+        return 'avi'
     if head[:6] in (b'GIF87a', b'GIF89a'):
         return 'gif'
+    if head[:2] == b'BM':
+        return 'bmp'
+    if head[:4] in (b'II*\x00', b'MM\x00*'):
+        return 'tif'
+    if head[:4] == b'\x00\x00\x01\x00':
+        return 'ico'
+    if head[:3] == b'FLV':
+        return 'flv'
+    if head[:4] == b'\x1a\x45\xdf\xa3':
+        return 'mkv'        # EBML 容器，webm 与 mkv 同族
+    if head[:1] == b'\x47' and len(head) > 188 and head[188:189] == b'\x47':
+        return 'ts'         # MPEG-TS：同步字节 0x47，每 188 字节一个
     if head[4:8] == b'ftyp':
         brand = head[8:12]
         if brand in (b'heic', b'heix', b'hevc', b'hevx', b'mif1', b'msf1'):
             return 'heic'
         if brand == b'avif':
             return 'avif'
+        if brand == b'qt  ':
+            return 'mov'
+        if brand in (b'M4V ', b'M4VH', b'M4VP'):
+            return 'm4v'
+        if brand[:3] == b'3gp':
+            return '3gp'
         return 'mp4'
     return ''
 
@@ -84,9 +129,10 @@ def ext_from_url(url):
         path = urlparse(url).path.lower()
     except Exception:
         return ''
-    for ext in VIDEO_EXTS + ('jpg', 'jpeg', 'png', 'webp', 'gif', 'heic', 'heif', 'avif'):
+    for ext in (VIDEO_EXTS + tuple(VIDEO_ALIASES)
+                + IMAGE_EXTS + tuple(IMAGE_ALIASES)):
         if path.endswith('.' + ext):
-            return 'jpg' if ext == 'jpeg' else ext
+            return VIDEO_ALIASES.get(ext) or IMAGE_ALIASES.get(ext) or ext
     return ''
 
 
@@ -115,8 +161,7 @@ def final_target(blogger_dir, create_time, index, ext):
     return os.path.join(blogger_dir, PICTURE_DIR_NAME, suffix)
 
 
-def fetch_media(url, target, headers=None, blogger_dir=None, create_time=None,
-                index=0, log=None):
+def fetch_media(url, target, headers, blogger_dir, create_time, index=0, log=None):
     """
     下载单个地址：先落 .part，完成后按响应头/文件头/URL 后缀定扩展名，
     再按扩展名决定落盘目录（视频在根目录、图片在 picture/）。
@@ -138,10 +183,8 @@ def fetch_media(url, target, headers=None, blogger_dir=None, create_time=None,
                 if log and not logged:
                     logged = True
                     ext = ext_from_content_type(content_type) or ext_from_url(url)
-                    if ext and blogger_dir is not None and create_time is not None:
-                        display = final_target(blogger_dir, create_time, index, ext)
-                    else:
-                        display = target
+                    display = (final_target(blogger_dir, create_time, index, ext)
+                               if ext else target)
                     try:
                         log('正在下载 {}'.format(os.path.basename(display)))
                     except Exception:
@@ -150,11 +193,8 @@ def fetch_media(url, target, headers=None, blogger_dir=None, create_time=None,
             ext = (ext_from_content_type(content_type)
                    or detect_media_ext(target)
                    or ext_from_url(url)
-                   or naming.DEFAULT_IMAGE_EXT)
-            if blogger_dir is not None and create_time is not None:
-                final = final_target(blogger_dir, create_time, index, ext)
-            else:
-                final = target[:-len(PART_EXT) - 1] + '.' + ext
+                   or FALLBACK_EXT)
+            final = final_target(blogger_dir, create_time, index, ext)
             try:
                 parent = os.path.dirname(final)
                 if parent and not os.path.isdir(parent):

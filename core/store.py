@@ -25,7 +25,6 @@ from core.utils import make_dir, make_txt, read_txt, append_list_txt, rm_dir, sa
 
 HOMEPAGE_NAME = 'homepage.txt'
 ID_RECORD_NAME = 'aweme_id.txt'      # 保留原名，避免已有下载记录失效
-CACHE_DIR_NAME = '.cache'
 PICTURE_DIR_NAME = 'picture'
 
 

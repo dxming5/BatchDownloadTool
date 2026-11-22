@@ -46,17 +46,6 @@ def all_platforms():
     return list(_PLATFORMS)
 
 
-def keys():
-    """全部平台 key"""
-    return [platform.key for platform in _PLATFORMS]
-
-
 def is_platform_dir(name):
     """目录名是否是平台目录（下载根下的一级目录用）"""
     return (name or '') in _BY_KEY
-
-
-def label_of(key):
-    """平台显示名；未注册时回退为 key 本身"""
-    platform = _BY_KEY.get(key or '')
-    return getattr(platform, 'label', '') or (key or '')

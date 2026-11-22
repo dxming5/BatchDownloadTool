@@ -29,12 +29,6 @@ def read_txt(txt_dir):
         return [line.strip() for line in file_handle if line.strip()]
 
 
-def write_txt(txt_dir, text):
-    """追加写一行到txt文档（UTF-8）"""
-    with open(txt_dir, mode='a', encoding=ENCODING) as file_handle:
-        file_handle.write(text + '\n')
-
-
 def append_list_txt(txt_dir, content_list):
     """批量追加写入列表到txt文档（UTF-8）"""
     with open(txt_dir, mode='a', encoding=ENCODING) as file_handle:
@@ -63,16 +57,3 @@ def rm_dir(dir_path):
 def safe_name(name):
     """剔除不符合 Windows 文件夹名的字符：\\/:*?"<>| 与首尾空白、结尾点"""
     return re.sub(r'[\\/:*?"<>|\r\n\t]', '', name or '').strip().rstrip('.').strip()
-
-
-def human_size(size):
-    """字节数转成便于阅读的单位，用于日志（保留两位小数）"""
-    try:
-        size = float(size)
-    except (TypeError, ValueError):
-        return '0 B'
-    for unit in ('B', 'KB', 'MB', 'GB'):
-        if size < 1024 or unit == 'GB':
-            return ('{:.0f} {}' if unit == 'B' else '{:.2f} {}').format(size, unit)
-        size /= 1024.0
-    return '{:.2f} GB'.format(size)
