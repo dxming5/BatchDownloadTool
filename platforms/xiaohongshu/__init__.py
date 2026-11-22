@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-"""小红书平台实现：抓取 + 解析 + 下载参数"""
+"""小红书平台实现：抓取 + 下载组装"""
 
 from conf import settings
 from core.store import BloggerStore, download_root
 from platforms.base import Platform
-from platforms.xiaohongshu import download as download_impl, scraper
+from platforms.xiaohongshu import assemble, scraper
 
 
 def _user_id_of(url):
@@ -61,11 +61,11 @@ class XiaohongshuPlatform(Platform):
                 return store.read_ids(name)
         return set()
 
-    # ---------------- 下载 ----------------
+    # ---------------- 下载组装 ----------------
 
-    def download(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, store, on_progress=None, should_stop=None,
                  media_label=''):
-        return download_impl.download(
+        return assemble.run(
             result, store,
             on_progress=on_progress,
             should_stop=should_stop,
@@ -73,10 +73,10 @@ class XiaohongshuPlatform(Platform):
         )
 
     def headers(self):
-        return download_impl.headers()
+        return assemble.headers()
 
     def post_process(self, path):
-        return download_impl.post_process(path)
+        return assemble.post_process(path)
 
     def options(self):
         if self._options is None:

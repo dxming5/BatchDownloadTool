@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""微博平台实现：抓取 + 解析 + 下载参数"""
+"""微博平台实现：抓取 + 下载组装"""
 
 from conf import settings
 from platforms.base import Platform
-from platforms.weibo import download as download_impl, parser, scraper
+from platforms.weibo import assemble, scraper
 
 
 class WeiboPlatform(Platform):
@@ -26,7 +26,7 @@ class WeiboPlatform(Platform):
 
     def parse_target(self, url):
         """返回规范化的主页地址，写入 homepage.txt 供「更新」复用"""
-        return parser.home_url(parser.parse_uid(url))
+        return scraper.home_url(scraper.parse_uid(url))
 
     # ---------------- 抓取 ----------------
 
@@ -40,11 +40,11 @@ class WeiboPlatform(Platform):
             verbose=False,
         )
 
-    # ---------------- 下载 ----------------
+    # ---------------- 下载组装 ----------------
 
-    def download(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, store, on_progress=None, should_stop=None,
                  media_label=''):
-        return download_impl.download(
+        return assemble.run(
             result, store,
             on_progress=on_progress,
             should_stop=should_stop,
@@ -52,7 +52,7 @@ class WeiboPlatform(Platform):
         )
 
     def headers(self):
-        return download_impl.headers()
+        return assemble.headers()
 
     def options(self):
         if self._options is None:

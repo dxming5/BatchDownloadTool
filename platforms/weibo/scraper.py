@@ -15,14 +15,18 @@
 登录校验以 m.weibo.cn/api/config 的 data.login 为准：匿名访客的 Cookie 里
 同样会出现 SUB/SUBP，单看 Cookie 名会把访客判成已登录，于是拿匿名态去取数，
 只能看到首页的一小部分内容（表现为「下载不全」）。Cookie 只在接口不可用时兜底。
+
+链接取 uid、昵称与时间解析也在这里；图片/视频取址与下载组装在 assemble.py。
 """
 
+import datetime
 import random
+import re
 import time
 
 from conf import settings
 from core import browser
-from platforms.weibo import parser
+from core.utils import safe_name
 
 API = 'https://m.weibo.cn/api/container/getIndex'
 
@@ -64,6 +68,121 @@ REQUEST_HEADERS = {
 }
 
 
+# ---------------- 链接与字段解析 ----------------
+
+# 微博卡片接口里的容器前缀：107603 是「用户微博列表」，其余为资料类容器
+CONTAINER_PREFIXES = ('107603', '100505', '230413', '101511', '110003')
+
+MONTHS = {'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+          'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12}
+
+# 例：Fri Apr 21 00:00:00 +0800 2023
+_CREATED_RE = re.compile(
+    r'([A-Za-z]{3})\s+([A-Za-z]{3})\s+(\d{1,2})\s+'
+    r'(\d{2}):(\d{2}):(\d{2})\s+([+-])(\d{2})(\d{2})\s+(\d{4})')
+
+
+def parse_uid(raw):
+    """
+    从链接或裸 uid 中取博主 uid
+
+    兼容：m.weibo.cn/u/<uid>、/profile/<uid>、weibo.com/u/<uid>、
+         weibo.com/<uid>、卡片接口地址（containerid / value 参数）、裸数字 uid
+
+    Raises:
+        ValueError: 无法识别
+    """
+    value = (raw or '').replace('\ufeff', '').replace('\u200b', '').strip()
+    value = value.strip('"').strip("'")
+    if not value:
+        raise ValueError('缺少微博博主链接或 uid')
+
+    if value.isdigit() and len(value) >= 5:
+        return value
+
+    match = re.search(r'/(?:u|profile|n)/(\d{5,})', value)
+    if match:
+        return match.group(1)
+
+    # weibo.com/<uid>
+    match = re.search(r'weibo\.c(?:n|om)/(\d{5,})(?:[/?#]|$)', value)
+    if match:
+        return match.group(1)
+
+    # 卡片接口地址：containerid=107603<uid>
+    match = re.search(r'containerid=(\d{6,})', value)
+    if match:
+        digits = match.group(1)
+        for prefix in CONTAINER_PREFIXES:
+            if digits.startswith(prefix) and len(digits) > len(prefix):
+                return digits[len(prefix):]
+        return digits
+
+    # 卡片接口地址：value=<uid>
+    match = re.search(r'[?&]value=(\d{5,})', value)
+    if match:
+        return match.group(1)
+
+    raise ValueError('无法从内容中识别微博 uid：{}'.format(value[:80]))
+
+
+def home_url(uid):
+    """规范化主页地址；写进 homepage.txt，「更新」时能被再次识别"""
+    return 'https://m.weibo.cn/u/{}'.format(uid)
+
+
+def posts_container(uid):
+    """用户微博列表的容器 ID"""
+    return '107603{}'.format(uid)
+
+
+def mblog_id_of(mblog):
+    """微博 ID；取不到返回空串"""
+    for key in ('id', 'mid', 'bid'):
+        value = (mblog or {}).get(key)
+        if value:
+            return str(value)
+    return ''
+
+
+def author_of(mblog):
+    """作者昵称；取不到返回空串"""
+    user = (mblog or {}).get('user') or {}
+    return safe_name(user.get('screen_name') or user.get('name') or '')
+
+
+def created_at(mblog):
+    """
+    发布时间转成秒级时间戳
+
+    微博给的是带时区的英文格式（Fri Apr 21 00:00:00 +0800 2023），
+    手工解析的原因：struct/parsedate 对「日期在月份之前、年份在末尾」的写法不稳定。
+    解析失败返回 0，由下载层按「缺少发布时间」跳过。
+    """
+    text = ((mblog or {}).get('created_at') or '').strip()
+    if not text:
+        return 0
+
+    match = _CREATED_RE.search(text)
+    if match:
+        _week, month, day, hour, minute, second, sign, off_h, off_m, year = match.groups()
+        offset = (int(off_h) * 60 + int(off_m)) * (1 if sign == '+' else -1)
+        try:
+            zone = datetime.timezone(datetime.timedelta(minutes=offset))
+            moment = datetime.datetime(int(year), MONTHS.get(month, 1), int(day),
+                                       int(hour), int(minute), int(second), tzinfo=zone)
+            return int(moment.timestamp())
+        except ValueError:
+            return 0
+
+    for pattern in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return int(datetime.datetime.strptime(text, pattern).timestamp())
+        except ValueError:
+            continue
+    return 0
+
+
 def _sleep(seconds, should_stop=None):
     """可取消的等待：取消时最多多等一个轮询周期"""
     remained = float(seconds)
@@ -78,7 +197,7 @@ def _sleep(seconds, should_stop=None):
 
 def _api_url(uid, since_id):
     return '{}?type=uid&value={}&containerid={}&since_id={}'.format(
-        API, uid, parser.posts_container(uid), since_id)
+        API, uid, posts_container(uid), since_id)
 
 
 def _no_more_content(message):
@@ -281,8 +400,8 @@ def fetch_user_posts(target, options=None, since_ts=None,
     from playwright.sync_api import sync_playwright
 
     options = options or {}
-    uid = parser.parse_uid(target)
-    user_url = parser.home_url(uid)
+    uid = parse_uid(target)
+    user_url = home_url(uid)
 
     profile_dir = options.get('profile_dir') or settings.platform_profile_dir('weibo')
     headless = bool(options.get('headless', True))
@@ -402,11 +521,11 @@ def fetch_user_posts(target, options=None, since_ts=None,
                         continue
                     found += 1
 
-                    mblog_id = parser.mblog_id_of(mblog)
+                    mblog_id = mblog_id_of(mblog)
                     if not mblog_id or mblog_id in seen_ids:
                         continue
 
-                    created = parser.created_at(mblog)
+                    created = created_at(mblog)
                     if since_ts and created and created < since_ts:
                         stale_run += 1
                         if stale_run >= stale_limit:
@@ -448,7 +567,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
                     break
 
             if mblogs and not nickname:
-                nickname = parser.author_of(mblogs[0])
+                nickname = author_of(mblogs[0])
             if not nickname:
                 try:
                     title = (page.title() or '').strip()

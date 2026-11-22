@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""抖音平台实现：抓取 + 解析 + 下载参数"""
+"""抖音平台实现：抓取 + 下载组装"""
 
 from conf import settings
 from platforms.base import Platform
-from platforms.douyin import download as download_impl, scraper
+from platforms.douyin import assemble, scraper
 
 
 class DouyinPlatform(Platform):
@@ -35,11 +35,11 @@ class DouyinPlatform(Platform):
             verbose=False,
         )
 
-    # ---------------- 下载 ----------------
+    # ---------------- 下载组装 ----------------
 
-    def download(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, store, on_progress=None, should_stop=None,
                  media_label=''):
-        return download_impl.download(
+        return assemble.run(
             result, store,
             on_progress=on_progress,
             should_stop=should_stop,
@@ -47,7 +47,7 @@ class DouyinPlatform(Platform):
         )
 
     def headers(self):
-        return download_impl.headers()
+        return assemble.headers()
 
     def options(self):
         if self._options is None:

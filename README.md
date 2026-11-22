@@ -33,20 +33,17 @@ douyin/
 │   ├── browser.py             # 通用浏览器能力（启动、滚动、登录等待）
 │   ├── downloader.py          # 单个地址下载（重试、清理、.part 定名）+ 并发调度
 │   └── utils.py               # 工具函数
-├── platforms/                 # 平台实现层（每个平台一份抓取 / 工具 / 下载）
+├── platforms/                 # 平台实现层（每个平台一份抓取 / 下载组装）
 │   ├── base.py                # 平台接口约定
 │   ├── douyin/
 │   │   ├── scraper.py         # 链接解析、列表采集
-│   │   ├── parser.py          # 作品类型判定
-│   │   └── download.py        # 挑条目、取地址、命名、落盘、进度
+│   │   └── assemble.py        # 类型判定、挑条目、取地址、进度
 │   ├── xiaohongshu/
-│   │   ├── scraper.py         # 首屏 SSR + 接口分页 + 逐条取详情
-│   │   ├── parser.py          # 图文/视频判定、去水印、选码率
-│   │   └── download.py        # 挑条目、取地址、命名、落盘、HEIC 转 JPG
+│   │   ├── scraper.py         # 首屏 SSR + 接口分页 + 逐条取详情、字段读取
+│   │   └── assemble.py        # 图文/视频判定、去水印、选码率、挑条目、HEIC 转 JPG
 │   └── weibo/
-│       ├── scraper.py         # Playwright 扫码登录 + 卡片接口 since_id 翻页
-│       ├── parser.py          # 链接取 uid、时间解析、类型判定、pics → large.url / page_info → 视频地址
-│       └── download.py        # 挑条目（图片/视频）、并发下载、按篇报进度、按微博 ID 去重
+│       ├── scraper.py         # Playwright 扫码登录 + 卡片接口 since_id 翻页、链接取 uid、时间解析
+│       └── assemble.py        # 类型判定、pics → large.url / page_info → 视频地址、挑条目、按篇报进度
 ├── media/                     # 缩略图与视频封面缓存
 ├── web/
 │   ├── app.py                 # 路由
@@ -224,25 +221,25 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 项目按「公用层 + 平台实现层」组织：公用层只写机制（任务、编排、存储、命名、浏览器、单文件下载、媒体），平台层写规则与下载流程（链接识别、列表采集、类型判定、取地址、命名落盘、进度上报）。
 
-关键约定：**抓取结果不做统一转换**。`platform.scrape()` 返回平台自己的原始结构，`platform.download(result, store, ...)` 原样接收，由平台按自己的字段挑条目、取地址、命名。公用层不引入跨平台的中间数据结构，也就不会因为某个平台的字段差异反过来改核心代码。
+关键约定：**抓取结果不做统一转换**。`platform.scrape()` 返回平台自己的原始结构，`platform.assemble(result, store, ...)` 原样接收，由平台按自己的字段挑条目、取地址、命名。公用层不引入跨平台的中间数据结构，也就不会因为某个平台的字段差异反过来改核心代码。
 
-新增平台只需补 `platforms/<平台>/` 三个文件（scraper / parser / download）并在 `platforms/__init__.py` 注册一行；下载进度必须按「篇」上报、ID 按篇记录、日志固定为 `下载 {发布时间}`，见下节「进度约定」「ID 记录约定」与「下载日志约定」。
+新增平台只需补 `platforms/<平台>/` 两个文件（`scraper.py` 获取数据、`assemble.py` 组装下载）并在 `platforms/__init__.py` 注册一行；下载进度必须按「篇」上报、ID 按篇记录、日志固定为 `下载 {发布时间}`，见下节「进度约定」「ID 记录约定」与「下载日志约定」。
 
 | 模块 | 职责 |
 |------|------|
 | `web_app.py` | 程序入口，寻找空闲端口并打开浏览器 |
 | `conf/settings.py` | 配置读取（固定读 `conf/config.ini`，按平台分段） |
 | `core/task.py` | 任务状态、进度、日志、取消、快照；百分比按 done/total 换算 |
-| `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.download()` |
+| `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.assemble()` |
 | `core/registry.py` | 平台注册表（key、显示名、链接识别） |
 | `core/store.py` | 博主目录、去重记录、主页链接（无全局路径态） |
 | `core/naming.py` | 时间格式与落盘命名 |
 | `core/browser.py` | 通用浏览器能力（上下文、滚动、登录等待、响应解析） |
 | `core/downloader.py` | 单个地址下载（重试、清理半成品、`.part` 扩展名探测）与批量并发调度 `fetch_all` |
-| `platforms/base.py` | 平台接口约定（match / parse_target / scrape / download / headers / options） |
-| `platforms/douyin/` | 抖音：链接解析、列表采集、类型判定、挑条目、取地址、命名落盘 |
-| `platforms/xiaohongshu/` | 小红书：首屏 SSR + 接口分页、逐条取详情、图文/视频判定、去水印、HEIC 转 JPG、下载流程 |
-| `platforms/weibo/` | 微博：链接取 uid、扫码登录、卡片接口 `since_id` 翻页、类型判定（图片/视频）、`pics → large.url` 与 `page_info → 视频地址` 取址、按篇报进度、按微博 ID 去重与下载流程 |
+| `platforms/base.py` | 平台接口约定（match / parse_target / scrape / assemble / headers / options） |
+| `platforms/douyin/` | 抖音：链接解析、列表采集、类型判定、挑条目、取地址、命名材料 |
+| `platforms/xiaohongshu/` | 小红书：首屏 SSR + 接口分页、逐条取详情、图文/视频判定、去水印、HEIC 转 JPG、下载组装 |
+| `platforms/weibo/` | 微博：链接取 uid、扫码登录、卡片接口 `since_id` 翻页、类型判定（图片/视频）、`pics → large.url` 与 `page_info → 视频地址` 取址、按篇报进度、按微博 ID 去重与下载组装 |
 | `media/` | 缩略图与视频封面缓存 |
 | `web/app.py` | Flask 路由：任务、博主、封面上传 |
 | `web/media_api.py` | 媒体响应（按区间读文件、缩略图、封面） |
@@ -253,7 +250,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 一次任务严格分两阶段，**先抓完再下载**：
 
 1. `platform.scrape(target, options)` —— 平台开浏览器翻页，结果全量累加后一次性返回（抖音是接口 JSON 列表，小红书是逐条补齐的详情列表，微博是卡片接口按页累积的 mblog 列表）
-2. `platform.download(result, store)` —— 平台从自己返回的结构里挑出可下载条目，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.webp`（微博为 `.jpg`）落盘；每个文件下载完成即计 1 个进度，全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 aweme_id / 小红书 note_id / 微博 mblog_id）
+2. `platform.assemble(result, store)` —— 平台从自己返回的结构里挑出可下载条目，组装成 `(篇 ID, 发布时间, [地址])` 交给公用下载层，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.webp`（微博为 `.jpg`）落盘；每个文件下载完成即计 1 个进度，全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 aweme_id / 小红书 note_id / 微博 mblog_id）
 
 并发只发生在第 2 步内部：平台先算出全部落盘路径，再把这些地址交给线程池（`[download] workers`，默认 4，1 表示逐个下载），每个文件完成即计 1 个进度，结果回到主线程按篇聚合，全成功才记 ID。
 
@@ -261,7 +258,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 | 层 | 负责 |
 |---|---|
-| 平台 `download()` | 挑哪些条目、取地址、算发布时间、何时记 ID；把 `(篇 ID, 发布时间, [地址])` 交给下载层 |
+| 平台 `assemble()` | 挑哪些条目、取地址、算发布时间、何时记 ID；把 `(篇 ID, 发布时间, [地址])` 交给下载层 |
 | `core/downloader.py` | 校验已下载、命名落盘（按扩展名分目录）、重试与扩展名探测、批量并发调度、按实际地址数统一计算进度 |
 | `core/task.py` | 收 `done` / `total` 换算百分比，维护日志、失败清单、取消状态 |
 | `core/pipeline.py` | 串联两阶段，处理取消与「没有可下载内容」的收尾 |

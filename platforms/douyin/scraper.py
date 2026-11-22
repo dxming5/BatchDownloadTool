@@ -7,6 +7,7 @@
 滚动到底部触发翻页，直到接口返回 has_more = 0 为止。
 
 通用浏览器能力（启动上下文、滚动、登录等待）由 core.browser 提供。
+作品类型判定、取址与下载组装在 assemble.py。
 """
 
 import json

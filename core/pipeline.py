@@ -63,9 +63,9 @@ def run(url, month_days, task):
     # 登记主页链接，之后点「更新」就不用再粘贴
     store.save_homepage(folder_name, result.get('user_url') or '')
 
-    # ---------------- 下载 ----------------
+    # ---------------- 下载组装 ----------------
     task.set_phase('download')
-    stats = platform.download(result, store,
+    stats = platform.assemble(result, store,
                               on_progress=task.push,
                               should_stop=task.stop_flag.is_set,
                               media_label=platform.media_label) or {}

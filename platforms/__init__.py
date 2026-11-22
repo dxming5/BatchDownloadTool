@@ -3,7 +3,7 @@
 平台注册
 
 新增平台只需：
-    1. 在 platforms/<key>/ 下实现 scraper / parser / download 与平台类
+    1. 在 platforms/<key>/ 下实现 scraper / assemble 与平台类
     2. 在这里 import 并 register
 
 公用层通过 core.registry 使用平台，不直接 import 本包。

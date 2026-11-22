@@ -1,23 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-小红书下载
+小红书下载组装
 
-差异有三处：
+把抓取结果组装成「下什么、从哪下」，再交给 core.downloader 统一执行。
+
+与另外两个平台不同的地方有三处：
 1. 请求头要带小红书自己的 Referer，否则 CDN 可能拒
 2. 媒体地址不带后缀，扩展名由下载机制按响应头 + 文件头探测
 3. HEIC 图片浏览器与 Pillow 都读不了，落盘后转成 JPG 并删原件
 """
 
 import os
+import re
 
 from conf import settings
 from core import downloader, naming
 from core.utils import safe_name
-from platforms.xiaohongshu import parser
+from platforms.xiaohongshu import scraper
 
 KEY = 'xiaohongshu'
 
 ID_RECORD_LABEL = '小红书笔记'
+
+# 小红书原图的 CDN 主机；展示链路下发的是带平台水印的压缩档
+ORIGIN_HOST = 'https://sns-img-qc.xhscdn.com/'
 
 # HEIC 解码依赖：未安装 pillow-heif 时跳过转码，保留原文件
 try:
@@ -84,16 +90,106 @@ def post_process(path):
     return heic_to_jpeg(path)
 
 
-def media_urls(note, kind):
-    """
-    小红书取址规则
+# ---------------- 类型判定与取址 ----------------
 
-    视频：遍历编码档位挑最优一路；
-    图片：还原为无水印原图。
+def is_live_album(note):
+    """实况照片合集：type 是 video，但每张图都带 livePhoto 标记"""
+    images = scraper.image_list_of(note)
+    return bool(images) and all(image.get('livePhoto') for image in images)
+
+
+def extract_video(note):
     """
-    if kind == 'video':
-        return [parser.extract_video(note)]
-    return parser.extract_images(note)
+    取视频播放地址
+
+    不同版本的流字段名不一致（h264/h265 或 EF4~EF7 等编码档位），
+    因此不认具体键名，遍历所有档位按码率（取不到按高度）挑最优一路。
+    """
+    video = note.get('video') or {}
+    streams = (video.get('media') or {}).get('stream') or {}
+
+    best_url = ''
+    best_score = -1
+    for items in streams.values():
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            url = item.get('masterUrl') or item.get('master_url') or ''
+            if not url:
+                continue
+            score = item.get('videoBitrate') or item.get('avgBitrate') or 0
+            if not score:
+                score = (item.get('height') or 0) * 1000
+            if score > best_score:
+                best_url, best_score = url, score
+    return best_url
+
+
+def classify(note):
+    """
+    判定按图片还是视频处理
+
+    图片全部带实况标记         → 图片（实况合集）
+    有视频流且图片至多 1 张     → 视频（那 1 张只是封面）
+    其余（多图 + 有视频流）     → 图片（平台把多图合成了轮播视频，不能当视频下）
+    """
+    images = scraper.image_list_of(note)
+    if is_live_album(note):
+        return 'image'
+    if extract_video(note) and len(images) <= 1:
+        return 'video'
+    return 'image'
+
+
+def no_watermark_url(url):
+    """
+    把带水印的展示图地址还原为无水印原图
+
+    展示链路下发的是压缩档（如 !nd_dft），平台水印合成在这份上；
+    原图在 sns-img-qc 上直接用「目录/图片ID」寻址，分辨率与体积都最大且无水印。
+    转换规则不成立时原样返回，避免把可用地址改坏。
+    """
+    if not url:
+        return url
+    clean = url.split('!')[0].rstrip('/')
+    parts = clean.rsplit('/', 2)
+    if len(parts) < 2:
+        return url
+
+    last = parts[-1]
+    prev = parts[-2]
+    # 上一级可能是哈希目录（32 位 hex）或时间戳目录（纯数字），
+    # 这两类只是 CDN 分片前缀，不属于图片路径
+    if re.match(r'^([0-9a-f]{32}|\d{8,14})$', prev):
+        path = last
+    else:
+        path = prev + '/' + last
+
+    if not re.match(r'^([0-9a-zA-Z_]+/)?[0-9a-zA-Z]+$', path):
+        return url
+    return ORIGIN_HOST + path
+
+
+def extract_images(note, no_watermark=True):
+    """
+    取出全部图片地址（默认转成无水印原图）
+
+    SSR 的 imageList 每项可能有 urlDefault，也可能只给 infoList：
+    WB_DFT 是原图，WB_PRV 是预览图。
+    """
+    urls = []
+    for image in scraper.image_list_of(note):
+        url = image.get('urlDefault') or image.get('url_default') or ''
+        if not url:
+            infos = image.get('infoList') or image.get('info_list') or []
+            by_scene = {info.get('imageScene'): info.get('url')
+                        for info in infos if info.get('url')}
+            url = by_scene.get('WB_DFT') or by_scene.get('WB_PRV') or ''
+        if url:
+            urls.append(no_watermark_url(url) if no_watermark else url)
+    return urls
 
 
 def collect(result):
@@ -118,14 +214,14 @@ def collect(result):
         if not isinstance(note, dict):
             continue
 
-        note_id = parser.note_id_of(note)
+        note_id = scraper.note_id_of(note)
         if not note_id:
             continue
         note_id = str(note_id)
         if note_id in seen:
             continue
 
-        author = parser.author_of(note)
+        author = scraper.author_of(note)
         if not author:
             continue
 
@@ -134,19 +230,17 @@ def collect(result):
             dropped[author] = dropped.get(author, 0) + 1
             continue
 
-        kind = parser.classify(note)
+        kind = classify(note)
         seen.add(note_id)
         entries.append({'id': note_id, 'author': author, 'kind': kind,
-                        'create_time': parser.created_at(note),
-                        # 图片格式要到下载时才知道（地址不带后缀），ext 留空待探测
-                        'ext': 'mp4' if kind == 'video' else '',
+                        'create_time': scraper.created_at(note),
                         'raw': note})
 
     return entries, {}, dropped
 
 
-def download(result, store, on_progress=None, should_stop=None,
-             media_label=ID_RECORD_LABEL):
+def run(result, store, on_progress=None, should_stop=None,
+        media_label=ID_RECORD_LABEL):
     """
     并发下载小红书笔记，进度按实际媒体地址数统计
 
@@ -233,7 +327,11 @@ def download(result, store, on_progress=None, should_stop=None,
             report(entry, False, skipped=True, reason='no_time')
             continue
 
-        urls = [url for url in media_urls(entry['raw'], entry['kind']) if url]
+        if entry['kind'] == 'video':
+            urls = [extract_video(entry['raw'])]
+        else:
+            urls = extract_images(entry['raw'])
+        urls = [url for url in urls if url]
 
         # 没有可用地址：记失败，不记录 ID
         if not urls:

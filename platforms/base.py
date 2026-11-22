@@ -20,7 +20,7 @@ class Platform(object):
         match(url)     链接是否属于本平台
         parse_target   从链接取出目标标识
         scrape         抓取并返回平台自定的结果结构
-        download       这批内容怎么下载（挑条目、取地址、命名、上报都由平台决定）
+        assemble       这批内容怎么下（挑条目、取地址、命名材料都由平台决定）
 
     可选：
         headers()      下载用的请求头
@@ -43,9 +43,9 @@ class Platform(object):
     def scrape(self, target, options, on_progress=None, should_stop=None):
         raise NotImplementedError
 
-    def download(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, store, on_progress=None, should_stop=None,
                  media_label=''):
-        """这批内容怎么下载：挑哪些、地址怎么取由平台决定
+        """这批内容怎么下：挑哪些、地址怎么取由平台决定
 
         把条目整理成 (篇 ID, 发布时间, [地址]) 交给 downloader.fetch_all，
         由下载层统一校验去重、命名落盘、并发下载与按地址计进度；

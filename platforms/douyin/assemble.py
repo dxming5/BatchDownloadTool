@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-抖音下载
+抖音下载组装
 
-请求头需要带抖音的 Referer。
-先按抖音接口结构挑出可下载的作品（作者与目标博主不一致的直接丢弃），再逐条落盘：
+把抓取结果组装成「下什么、从哪下」，再交给 core.downloader 统一执行。
+
+请求头需要带抖音的 Referer。先按抖音接口结构挑出可下载的作品
+（作者与目标博主不一致的直接丢弃），再逐条落盘：
 目录与去重名单只读一次，全部媒体成功才记录 ID，ID 每满一批落盘一次。
 """
 
@@ -12,7 +14,6 @@ import os
 from conf import settings
 from core import downloader, naming
 from core.utils import safe_name
-from platforms.douyin import parser
 
 KEY = 'douyin'
 
@@ -28,6 +29,16 @@ def headers():
     if options.get('accept'):
         values['Accept'] = options['accept']
     return values
+
+
+def classify(aweme, image_types, video_types):
+    """按配置判定作品类型；不属于任何已配置类型时返回 None"""
+    aweme_type = aweme.get('aweme_type')
+    if aweme_type in image_types:
+        return 'image'
+    if aweme_type in video_types:
+        return 'video'
+    return None
 
 
 def media_urls(aweme, kind):
@@ -91,7 +102,7 @@ def collect(result):
             dropped[author] = dropped.get(author, 0) + 1
             continue
 
-        kind = parser.classify(aweme, image_types, video_types)
+        kind = classify(aweme, image_types, video_types)
         if kind is None:
             aweme_type = aweme.get('aweme_type')
             label = '缺失' if aweme_type is None else str(aweme_type)
@@ -101,14 +112,13 @@ def collect(result):
         seen.add(aweme_id)
         entries.append({'id': aweme_id, 'author': author, 'kind': kind,
                         'create_time': aweme.get('create_time') or 0,
-                        'ext': 'mp4' if kind == 'video' else 'webp',
                         'raw': aweme})
 
     return entries, unknown, dropped
 
 
-def download(result, store, on_progress=None, should_stop=None,
-             media_label=ID_RECORD_LABEL):
+def run(result, store, on_progress=None, should_stop=None,
+        media_label=ID_RECORD_LABEL):
     """
     并发下载抖音作品，进度按实际媒体地址数统计
 

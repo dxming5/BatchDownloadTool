@@ -9,6 +9,9 @@
 2. 列表只用来发现条目，数据不全（可能不带媒体地址），一律带 xsec_token
    打开详情取完整数据；详情页对 xsec_source 敏感，两个来源参数都试一次；
 3. 登录态看 web_session（a1 只是设备标识），浏览器数据目录与抖音隔离。
+
+笔记字段读取（ID / 作者 / 时间 / token）也在这里；图文视频判定、去水印、
+选码率与下载组装在 assemble.py。
 """
 
 import json
@@ -17,7 +20,7 @@ import time
 
 from conf import settings
 from core import browser
-from platforms.xiaohongshu import parser
+from core.utils import safe_name
 
 LIST_MARK = '/api/sns/web/v1/user_posted'   # 主页笔记列表
 FEED_MARK = '/api/sns/web/v1/feed'          # 笔记详情
@@ -92,6 +95,54 @@ NOTE_STATE_JS = """
 """
 
 
+# ---------------- 字段读取 ----------------
+
+def note_card_of(note):
+    """列表项里的 note_card（不同版本字段名大小写不一）"""
+    return note.get('note_card') or note.get('noteCard') or {}
+
+
+def image_list_of(note):
+    """图片列表（兼容 imageList / image_list）"""
+    return note.get('imageList') or note.get('image_list') or []
+
+
+def note_id_of(note):
+    return note.get('note_id') or note.get('noteId') or note.get('id')
+
+
+def author_of(note):
+    """作者昵称：列表项可能在顶层，也可能在 note_card 里"""
+    for source in (note, note_card_of(note)):
+        user = source.get('user') or {}
+        nickname = user.get('nickname') or user.get('nickName') or ''
+        if nickname:
+            return safe_name(nickname)
+    return ''
+
+
+def created_at(note):
+    """发布时间统一为秒（小红书给的是毫秒）"""
+    for source in (note, note_card_of(note)):
+        value = source.get('time')
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 10 ** 11:      # 毫秒
+            value //= 1000
+        return value
+    return 0
+
+
+def has_token(note):
+    """是否带 xsec_token（没有它打不开详情）"""
+    for source in (note, note_card_of(note)):
+        if source.get('xsec_token') or source.get('xsecToken'):
+            return True
+    return False
+
+
 def parse_user_id(raw):
     """
     从主页链接取 user_id 与规范化后的主页地址
@@ -126,7 +177,7 @@ def read_ssr_notes(page):
     except ValueError:
         return []
     return [item for item in data
-            if isinstance(item, dict) and parser.note_id_of(item)]
+            if isinstance(item, dict) and note_id_of(item)]
 
 
 def read_note_state(page, note_id):
@@ -161,10 +212,10 @@ def open_detail(context, note, timeout_ms):
     Returns:
         dict|None: 笔记数据（字段大小写与列表可能不同，由解析层兼容）
     """
-    note_id = parser.note_id_of(note)
+    note_id = note_id_of(note)
     token = (note.get('xsec_token') or note.get('xsecToken')
-             or parser.note_card_of(note).get('xsec_token')
-             or parser.note_card_of(note).get('xsecToken') or '')
+             or note_card_of(note).get('xsec_token')
+             or note_card_of(note).get('xsecToken') or '')
     if not note_id or not token:
         return None
 
@@ -247,8 +298,8 @@ def fill_details(context, notes, options, on_progress=None, should_stop=None,
         if should_stop and should_stop():
             break
 
-        note_id = parser.note_id_of(note)
-        if not note_id or not parser.has_token(note):
+        note_id = note_id_of(note)
+        if not note_id or not has_token(note):
             continue
         if str(note_id) in skip_ids:
             known += 1
@@ -260,7 +311,7 @@ def fill_details(context, notes, options, on_progress=None, should_stop=None,
 
         detail = dict(detail)
         # 详情偶尔不带 ID：只补标识，不动内容字段
-        if not parser.note_id_of(detail):
+        if not note_id_of(detail):
             detail['note_id'] = note_id
         details.append(detail)
 
@@ -327,10 +378,10 @@ def fetch_user_notes(target, options=None, since_ts=None,
     def accept(note):
         """入库一条笔记；返回是否新增（按 since_ts 过滤并驱动早停）"""
         nonlocal stale_run, early_stop
-        note_id = parser.note_id_of(note)
+        note_id = note_id_of(note)
         if not note_id or note_id in seen_ids:
             return False
-        created = parser.created_at(note)
+        created = created_at(note)
         if since_ts and created and created < since_ts:
             stale_run += 1
             if stale_run >= stale_limit:
@@ -499,7 +550,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
                     verbose=verbose)
 
             for note in detail_notes:
-                nickname = parser.author_of(note)
+                nickname = author_of(note)
                 if nickname:
                     break
             if not nickname:
