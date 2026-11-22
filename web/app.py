@@ -27,8 +27,8 @@ from core.pipeline import run as run_pipeline
 from core.store import BloggerStore, download_root
 from core.task import Task
 from core.utils import make_dir, rm_dir
-from media.covers import cover_path
 from web.media_api import MEDIA_EXTS, VIDEO_EXTS, media_response, resolve_media
+from web.media_cache import cover_path
 
 _TASKS = collections.OrderedDict()   # task_id -> Task，保持插入顺序便于淘汰
 _TASKS_LIMIT = 20

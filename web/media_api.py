@@ -10,8 +10,7 @@ import os
 
 from flask import abort, send_file
 
-from media.covers import cover_path
-from media.thumbs import make_thumb
+from web.media_cache import cover_path, make_thumb
 
 # 浏览范围：抖音产出 jpg/png/webp/mp4；小红书还会产出 avif/gif，
 # 未装 pillow-heif 时可能残留 heic（前端不一定能显示，但至少要列出来）
