@@ -286,9 +286,9 @@ textarea {
   min-width: 220px;
 }
 
-/* 主页链接输入框：多行，但不必像通用 textarea 那么高 */
+/* 主页链接输入框：与关注模式的操作框同高（--field-h） */
 #userUrl {
-  min-height: 84px;
+  min-height: var(--field-h, 96px);
 }
 
 /* 抓取范围下拉框，与输入框、按钮保持同一行同一高度 */
@@ -348,7 +348,7 @@ textarea {
 .divider {
   height: 1px;
   background: var(--line);
-  margin: 18px 0 16px;
+  margin: 12px 0 12px;
 }
 
 /* 进度条独占一行；文字绝对定位叠在条上，不占位也不改变条长 */
@@ -388,8 +388,8 @@ textarea {
 }
 
 .log {
-  margin: 12px 0 0;
-  height: 150px; /* 固定高度，避免日志增减时下载框忽高忽低 */
+  margin: 10px 0 0;
+  height: 120px; /* 固定高度，避免日志增减时下载框忽高忽低 */
   overflow: auto;
   background: #0d1116;
   border: 1px solid var(--line);
@@ -439,6 +439,131 @@ summary {
   color: #8ab4ff;
   cursor: pointer;
   text-decoration: underline dotted;
+}
+
+/* ---------- 关注列表 ---------- */
+
+/* 两种方式的输入区等高：一行提示 + 96px 的内容区，切换时高度不跳 */
+.mode-pane {
+  display: flex;
+  flex-direction: column;
+  margin-top: 12px;
+  --field-h: 84px;
+}
+
+/* 提示与输入区之间留一点呼吸感，两种方式保持一致 */
+.mode-pane > .hint {
+  margin-bottom: 6px;
+}
+
+/* 关注模式的操作区：与输入框同款边框与底色，控件垂直居中 */
+.following-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--field-h);
+  background: #12161d;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.following-row {
+  margin-top: 0;
+  padding: 0 12px;
+}
+
+/* 已选计数贴右，和左边的「关注列表」按钮分开 */
+.following-row .picked {
+  margin-left: auto;
+}
+
+/* 底部动作行：紧贴输入区下方，和上下都留紧一点的间距 */
+.actions-row {
+  margin-top: 10px;
+}
+
+/* 动作行内控件统一高度，避免下拉框比按钮高出几像素 */
+.actions-row .select,
+.actions-row button {
+  height: 38px;
+}
+
+/* 关注列表下拉浮层：紧贴操作框下沿弹出，展开不影响页面高度 */
+.following-popover {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  padding: 10px 12px;
+  background: #12161d;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, .5);
+}
+
+.following-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+/* 展开 / 收起图标 */
+.chevron {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  transition: transform .15s ease;
+}
+
+#followingToggle[aria-expanded="true"] .chevron {
+  transform: translateY(1px) rotate(-135deg);
+}
+
+.following-list {
+  /* 视口偏矮时收敛列表高度，避免浮层被左栏滚动区裁掉 */
+  max-height: min(240px, 38vh);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.following-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.following-item:hover {
+  background: rgba(255, 255, 255, .03);
+}
+
+.following-item .name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.following-item .tag {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 /* ---------- 博主列表 ---------- */

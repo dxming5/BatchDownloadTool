@@ -96,6 +96,9 @@ _PLATFORM_DEFAULTS = {
     'browser_channel': '',
     'proxy': '',
     'timeout_ms': '30000',
+    'following_max_scroll': '200',
+    'following_limit': '0',
+    'following_interval': '1.0',
     'image_types': '68',
     'video_types': '0,51,55,61,66',
     'referer': '',
@@ -127,6 +130,7 @@ def platform_settings(key):
     Returns:
         dict: profile_dir / headless / wait_login / max_scroll / idle_rounds /
               month_days / browser_channel / proxy / timeout_ms /
+              following_max_scroll / following_limit / following_interval /
               image_types / video_types / referer / accept
     """
     section = _platform_section(key)
@@ -155,6 +159,13 @@ def platform_settings(key):
         value = raw(option) or fallback[option]
         return value.strip().lower() in ('1', 'true', 'yes', 'on')
 
+    def decimal(option, minimum):
+        try:
+            value = float(raw(option) or fallback[option])
+        except ValueError:
+            value = float(fallback[option])
+        return max(minimum, value)
+
     # 留空时统一落到 .pw_profile/<平台 key>，新增平台无需额外配置
     profile_dir = raw('profile_dir') or platform_profile_dir(key)
 
@@ -168,6 +179,9 @@ def platform_settings(key):
         'browser_channel': raw('browser_channel') or None,
         'proxy': raw('proxy') or None,
         'timeout_ms': number('timeout_ms', 5000),
+        'following_max_scroll': number('following_max_scroll', 1),
+        'following_limit': number('following_limit', 0),
+        'following_interval': decimal('following_interval', 0.0),
         'image_types': types('image_types'),
         'video_types': types('video_types'),
         'referer': raw('referer'),

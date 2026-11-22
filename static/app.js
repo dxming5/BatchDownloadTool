@@ -18,8 +18,12 @@
     scrapeReady: true,
     lastPhase: '',
     platforms: [],          /* [{key, label}]，来自 /api/status，新增平台自动出现 */
+    downloadMode: 'link',   /* link / following：两种下载方式同级切换 */
     platformFilter: '',     /* 博主列表的平台筛选，空表示全部 */
     bloggers: [],           /* 最近一次拉到的分组数据，批量更新时用 */
+    /* 关注列表：users 为清单，queued 记录已入队的链接，picked 为当前勾选数 */
+    following: null,
+    followingPicked: 0,
     /* 批量任务：mode 为 'scrape'（依次抓取链接）或 'update'（依次更新博主） */
     batch: null             /* {mode,queue,total,index,done,failed,errors,stopped,range,current} */
   };
@@ -124,6 +128,46 @@
       current = '';
     }
     select.value = current;
+    renderFollowingPlatforms(state.platforms);
+  }
+
+  /* 「获取我的关注」的平台下拉：只列出支持抓关注列表的平台 */
+  function renderFollowingPlatforms(platforms) {
+    var select = $('followingPlatform');
+    var supported = (platforms || []).filter(function (platform) {
+      return platform.following;
+    });
+    var current = select.value;
+    select.innerHTML = '';
+    supported.forEach(function (platform) {
+      var option = document.createElement('option');
+      option.value = platform.key;
+      option.textContent = platform.label;
+      select.appendChild(option);
+    });
+    if (current) select.value = current;
+    /* 支持几个平台就显示几个；一个都没有时才隐藏整行 */
+    select.classList.toggle('hidden', supported.length === 0);
+    if (!supported.length) {
+      $('followingBtn').title = '当前没有支持抓取关注列表的平台';
+      $('followingHint').textContent = '当前没有支持抓取关注列表的平台';
+      $('followingHint').classList.remove('hidden');
+    } else {
+      /* 顶部已有说明文案，这里只在异常时显示告警 */
+      $('followingBtn').title = '';
+      $('followingHint').textContent = '';
+      $('followingHint').classList.add('hidden');
+    }
+
+    /* 没有平台支持时，「关注列表下载」模式也置灰并退回链接下载 */
+    var modeSelect = $('downloadMode');
+    var followingOption = modeSelect.querySelector('option[value="following"]');
+    if (followingOption) followingOption.disabled = !supported.length;
+    if (!supported.length && modeSelect.value === 'following') {
+      setDownloadMode('link');
+    }
+
+    syncUpdateBtn();
   }
 
   function platformLabel(key) {
@@ -137,15 +181,67 @@
   function applyScrapeReady(ready) {
     if (ready === undefined) return;
     state.scrapeReady = !!ready;
-    var btn = $('scrapeBtn');
+    var btn = $('downloadBtn');
     btn.disabled = !state.scrapeReady;
     btn.title = state.scrapeReady ? '' : '未安装 playwright，请执行 pip install playwright 与 playwright install chromium';
     syncUpdateBtn();
   }
 
-  /* 有任务在跑或缺少 playwright 时禁用「更新」（批量）按钮 */
+  /* 有任务在跑或缺少 playwright 时禁用「更新」「获取我的关注」等入口 */
   function syncUpdateBtn() {
-    $('updateAllBtn').disabled = !state.scrapeReady || !!state.taskId || !!state.batch;
+    var busy = !state.scrapeReady || !!state.taskId || !!state.batch;
+    $('updateAllBtn').disabled = busy;
+    $('downloadMode').disabled = busy;      /* 任务中不允许切换下载方式 */
+    $('followingBtn').disabled = busy || !$('followingPlatform').options.length;
+    updateFollowingPicked();
+  }
+
+  /* 统一的「下载」按钮：两种方式共用，按当前模式分派 */
+  function syncDownloadBtn() {
+    var busy = !state.scrapeReady || !!state.taskId || !!state.batch;
+    /* 关注模式还没勾人时不能点，链接模式由提交时自行校验链接 */
+    var empty = state.downloadMode === 'following' && !state.followingPicked;
+    $('downloadBtn').disabled = busy || empty;
+  }
+
+  /* 下载方式：链接下载 / 关注列表下载，两者同级，只切换各自的输入区 */
+  function setDownloadMode(mode) {
+    var value = mode === 'following' ? 'following' : 'link';
+    var following = value === 'following';
+    state.downloadMode = value;
+    $('downloadMode').value = value;
+    $('linkPane').classList.toggle('hidden', following);
+    $('followingPane').classList.toggle('hidden', !following);
+    updateFollowingPicked();
+  }
+
+  /* 关注列表的勾选统计：计数 + 共用下载按钮的可用状态 */
+  function updateFollowingPicked() {
+    var boxes = followingBoxes();
+    var picked = 0;
+    for (var i = 0; i < boxes.length; i++) {
+      if (boxes[i].checked) picked += 1;
+    }
+    state.followingPicked = picked;
+    $('followingPicked').textContent = '已选 ' + picked + ' 位';
+    /* 有清单时才显示计数（在关注模式的操作框里） */
+    $('followingPicked').classList.toggle('hidden', !boxes.length);
+    syncDownloadBtn();
+  }
+
+  function followingBoxes() {
+    return $('followingList').querySelectorAll('input[type="checkbox"]');
+  }
+
+  /* 关注列表浮层开合：纯 CSS 定位，紧贴操作框下沿，展开不影响页面高度 */
+  function setFollowingOpen(open) {
+    $('followingBox').classList.toggle('hidden', !open);
+    $('followingToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+
+  /* 开始下载后把关注列表浮层收起，让日志与进度占满视野 */
+  function collapseFollowing() {
+    setFollowingOpen(false);
   }
 
   /* ---------------- 抓取任务 ---------------- */
@@ -175,6 +271,7 @@
       toast('已有任务在执行，请等待或先取消', true);
       return;
     }
+    collapseFollowing();
     if (urls.length === 1) {
       await submitScrape(urls[0]);
       return;
@@ -188,14 +285,14 @@
     $('logBox').textContent = '';
     state.logLength = 0;
     $('failureBox').classList.add('hidden');
-    $('scrapeBtn').disabled = true;
     syncUpdateBtn();
     nextBatchItem();
   }
 
   /* 单条链接：提交后在 beginTask 里接管轮询 */
   async function submitScrape(url) {
-    $('scrapeBtn').disabled = true;
+    /* 请求发出到任务接管之间有间隔，先禁用以防重复提交 */
+    $('downloadBtn').disabled = true;
     try {
       var data = await postJSON('/api/scrape', {
         url: url,
@@ -204,13 +301,15 @@
       beginTask(data.task);
       toast('已开始抓取，浏览器启动后会自动翻页');
     } catch (error) {
-      $('scrapeBtn').disabled = !state.scrapeReady;
+      syncDownloadBtn();
       toast(error.message, true);
     }
   }
 
   /* 任务启动渲染 */
   function beginTask(task) {
+    /* 刷新页面后恢复运行中的关注列表任务时，自动切到对应方式 */
+    if (task.mode === 'following') setDownloadMode('following');
     state.taskId = task.id;
     state.logLength = 0;
     state.lastPhase = task.phase;
@@ -248,9 +347,26 @@
     state.polling = false;
     state.taskId = null;
     $('cancelBtn').disabled = true;
-    $('scrapeBtn').disabled = !state.scrapeReady || !!state.batch;
-    /* 任务结束后立刻按最新状态恢复「更新」按钮，否则会一直停留在禁用态 */
+    /* 任务结束后立刻按最新状态恢复「下载」「更新」按钮，否则会一直停留在禁用态 */
     syncUpdateBtn();
+
+    /* 关注列表：结果交给面板，用户勾选后再入队 */
+    if (task.mode === 'following') {
+      if (task.status === 'error') {
+        toast(task.logs && task.logs.length ? task.logs[task.logs.length - 1]
+                                            : '读取关注列表失败', true);
+        return;
+      }
+      if (task.status === 'cancelled') {
+        toast('已取消读取关注列表');
+        return;
+      }
+      var users = task.following || [];
+      state.following = { users: users, queued: {} };
+      renderFollowing();
+      toast('关注列表已读取：共 ' + users.length + ' 位，勾选后加入队列');
+      return;
+    }
 
     /* 批量：一条跑完接着下一条，提示与列表刷新留到整批结束 */
     if (state.batch) {
@@ -291,13 +407,15 @@
 
   function renderTask(task) {
     var scraping = task.phase === 'scrape' && task.status === 'running';
+    var following = task.phase === 'following' && task.status === 'running';
     /* 进度条只表示下载进度：抓取阶段没有可靠总量，条保持不动 */
-    var percent = scraping ? 0 : (task.percent || 0);
+    var percent = (scraping || following) ? 0 : (task.percent || 0);
     $('bar').style.width = percent + '%';
 
-    /* 条上文字只表示当前任务的进度；还没有总量（如抓取阶段）时显示 0%（0/0） */
-    $('progressText').textContent = percent + '%（' +
-      (task.done || 0) + '/' + (task.total || 0) + '）';
+    /* 条上文字只表示当前任务的进度；关注列表阶段显示已抓到的人数 */
+    $('progressText').textContent = following
+      ? '已抓取 ' + (task.following_count || 0) + ' 人'
+      : percent + '%（' + (task.done || 0) + '/' + (task.total || 0) + '）';
 
     /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
     if (!state.batch && state.lastPhase && state.lastPhase !== task.phase) {
@@ -371,6 +489,127 @@
       toast('已请求取消，将在当前文件结束后停止');
     } catch (error) {
       toast(error.message, true);
+    }
+  }
+
+  /* ---------------- 关注列表（读取本机登录账号关注的博主） ---------------- */
+
+  async function startFollowing() {
+    if (state.taskId || state.batch) {
+      toast('已有任务在执行，请等待或先取消', true);
+      return;
+    }
+    var platform = $('followingPlatform').value;
+    if (!platform) {
+      toast('当前没有支持抓取关注列表的平台', true);
+      return;
+    }
+    state.following = null;
+    setFollowingOpen(false);
+    $('followingToggle').classList.add('hidden');
+    $('followingEmpty').classList.remove('hidden');
+    $('followingList').innerHTML = '';
+    $('followingBtn').disabled = true;
+    try {
+      var data = await postJSON('/api/following', { platform: platform });
+      beginTask(data.task);
+      toast('开始读取关注列表，浏览器启动后会自动翻页');
+    } catch (error) {
+      syncUpdateBtn();
+      toast(error.message, true);
+    }
+  }
+
+  /* 渲染关注清单：默认只勾没下载过的，已下载的加标签方便一眼分辨 */
+  function renderFollowing() {
+    var job = state.following;
+    var box = $('followingList');
+    box.innerHTML = '';
+    $('followingAll').checked = false;
+    if (!job || !job.users.length) {
+      setFollowingOpen(false);
+      $('followingToggle').classList.add('hidden');
+      $('followingEmpty').classList.remove('hidden');
+      $('followingCount').textContent = '0';
+      updateFollowingPicked();
+      return;
+    }
+
+    job.users.forEach(function (user) {
+      var row = document.createElement('label');
+      row.className = 'following-item';
+      row.title = user.url || '';
+
+      var input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = user.url || '';
+      /* 已下载过的默认不勾，避免重复排队 */
+      input.checked = !user.downloaded;
+      input.addEventListener('change', updateFollowingPicked);
+      row.appendChild(input);
+
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = user.name || user.uid || user.url;
+      row.appendChild(name);
+
+      if (user.downloaded) {
+        var tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.textContent = '已下载';
+        row.appendChild(tag);
+      }
+      box.appendChild(row);
+    });
+
+    $('followingCount').textContent = job.users.length;
+    $('followingToggle').classList.remove('hidden');
+    $('followingEmpty').classList.add('hidden');
+    /* 抓完直接展开浮层方便勾选；点「收起」或下载时关闭 */
+    setFollowingOpen(true);
+    updateFollowingPicked();
+  }
+
+  /* 勾选的博主转成抓取队列，复用现有批量链路（串行、失败不中断） */
+  function enqueueFollowing() {
+    if (!state.following) return;
+    var queue = [];
+    var seen = {};
+    var boxes = followingBoxes();
+    for (var i = 0; i < boxes.length; i++) {
+      var url = boxes[i].value;
+      if (!boxes[i].checked || !url || seen[url]) continue;
+      if (state.following.queued[url]) continue;
+      seen[url] = 1;
+      queue.push(url);
+    }
+    if (!queue.length) {
+      toast('请先勾选还没入队的博主', true);
+      return;
+    }
+    queue.forEach(function (url) { state.following.queued[url] = 1; });
+
+    /* 入队即开始下载：收起关注列表面板，把日志和进度露出来 */
+    collapseFollowing();
+
+    state.batch = {
+      mode: 'scrape', queue: queue, total: queue.length, index: 0,
+      done: 0, failed: 0, errors: [], stopped: false,
+      range: $('rangeSelect').value
+    };
+    $('logBox').textContent = '';
+    state.logLength = 0;
+    $('failureBox').classList.add('hidden');
+    syncUpdateBtn();
+    nextBatchItem();
+  }
+
+  /* 共用的「下载」按钮：按当前方式分派到链接提交或勾选入队 */
+  function onDownload() {
+    if (state.downloadMode === 'following') {
+      enqueueFollowing();
+    } else {
+      startScrape();
     }
   }
 
@@ -571,7 +810,6 @@
   function endBatch() {
     var job = state.batch;
     state.batch = null;
-    $('scrapeBtn').disabled = !state.scrapeReady;
     syncUpdateBtn();
     if (!job) return;
     var unit = job.mode === 'scrape' ? ' 个链接' : ' 位博主';
@@ -1145,7 +1383,7 @@
   /* ---------------- 事件绑定 ---------------- */
 
   function bind() {
-    $('scrapeBtn').addEventListener('click', startScrape);
+    $('downloadBtn').addEventListener('click', onDownload);
     $('confirmOk').addEventListener('click', function () { closeConfirm(true); });
     $('confirmCancel').addEventListener('click', function () { closeConfirm(false); });
     /* 点遮罩空白处等同取消 */
@@ -1161,6 +1399,30 @@
       }
     });
     $('cancelBtn').addEventListener('click', cancelTask);
+    $('downloadMode').addEventListener('change', function (event) {
+      setDownloadMode(event.target.value);
+    });
+    $('followingBtn').addEventListener('click', startFollowing);
+    $('followingToggle').addEventListener('click', function () {
+      setFollowingOpen($('followingBox').classList.contains('hidden'));
+    });
+    $('followingClose').addEventListener('click', function () {
+      setFollowingOpen(false);
+    });
+    /* 点浮层外部收起 */
+    document.addEventListener('mousedown', function (event) {
+      if ($('followingBox').classList.contains('hidden')) return;
+      if ($('followingBox').contains(event.target)) return;
+      if ($('followingToggle').contains(event.target)) return;
+      setFollowingOpen(false);
+    });
+    $('followingAll').addEventListener('change', function (event) {
+      var boxes = followingBoxes();
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].checked = event.target.checked;
+      }
+      updateFollowingPicked();
+    });
     $('updateAllBtn').addEventListener('click', startBatchUpdate);
     $('refreshBtn').addEventListener('click', refreshBloggers);
     $('platformFilter').addEventListener('change', function (event) {
@@ -1196,6 +1458,7 @@
   }
 
   function init() {
+    setDownloadMode('link');
     bind();
     refreshStatus();
     loadBloggers();

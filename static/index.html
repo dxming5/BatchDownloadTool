@@ -14,25 +14,70 @@
       <section class="card">
         <div class="card-head">
           <h2>下载</h2>
+          <div class="row tight">
+            <select id="downloadMode" class="select select-sm"
+                    title="选择下载方式：粘贴链接，或读取本机登录账号的关注列表">
+              <option value="link">链接下载</option>
+              <option value="following">关注列表下载</option>
+            </select>
+          </div>
         </div>
-        <p class="hint">
-          粘贴博主主页链接，每行一个，可一次粘贴多个（依次执行）。
-        </p>
-        <div class="row tight">
-          <textarea id="userUrl" rows="3" spellcheck="false"
-                    placeholder="https://www.douyin.com/user/MS4wLjABAAAA...
+
+        <!-- 方式一：链接下载 -->
+        <div id="linkPane" class="mode-pane">
+          <p class="hint">
+            粘贴博主主页链接，每行一个，可一次粘贴多个（依次执行）。
+          </p>
+          <div class="row tight">
+            <textarea id="userUrl" rows="3" spellcheck="false"
+                      placeholder="https://www.douyin.com/user/MS4wLjABAAAA...
 https://www.xiaohongshu.com/user/profile/xxxxxxxx
 https://m.weibo.cn/u/xxxxxxxxxx"></textarea>
+          </div>
         </div>
-        <div class="row">
+
+        <!-- 方式二：关注列表下载 -->
+        <div id="followingPane" class="mode-pane hidden">
+          <p class="hint">
+            读取本机已登录账号的关注列表，勾选后下载。
+          </p>
+          <div class="following-box">
+            <div class="row following-row">
+              <select id="followingPlatform" class="select select-sm hidden"
+                      title="从哪个平台读取本机登录账号的关注列表"></select>
+              <button id="followingBtn" class="ghost" disabled>获取我的关注</button>
+              <button id="followingToggle" class="ghost hidden" aria-expanded="false"
+                      title="展开 / 收起关注列表">
+                关注列表（<span id="followingCount">0</span>）
+                <span class="chevron"></span>
+              </button>
+              <span class="hint" id="followingEmpty">尚未读取关注列表</span>
+              <span class="hint picked hidden" id="followingPicked">已选 0 位</span>
+              <span class="hint hidden" id="followingHint"></span>
+            </div>
+
+            <!-- 下拉浮层：绝对定位，展开不改变页面高度 -->
+            <div id="followingBox" class="following-popover hidden">
+              <div class="following-popover-head">
+                <label class="hint"><input type="checkbox" id="followingAll"> 全选</label>
+                <button id="followingClose" class="ghost" type="button">收起</button>
+              </div>
+              <div id="followingList" class="following-list"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 两种方式共用：下载范围 + 动作（输入区等高，位置固定） -->
+        <div class="row actions-row">
           <select id="rangeSelect" class="select">
             <option value="all">全部作品</option>
             <option value="month">最近一个月</option>
           </select>
           <span class="spacer"></span>
-          <button id="scrapeBtn" class="primary">抓取并下载</button>
+          <button id="downloadBtn" class="primary">下载</button>
           <button id="cancelBtn" class="ghost danger" disabled>取消任务</button>
         </div>
+
         <div class="divider"></div>
 
         <div class="progress-row">

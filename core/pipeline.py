@@ -82,3 +82,57 @@ def run(url, month_days, task):
         task.mark('cancelled', '任务已取消')
     elif task.is_running():
         task.mark('done')
+
+
+def mark_downloaded(platform, store, users):
+    """给关注列表每项标注是否已有下载目录（只读 homepage.txt，不建目录）"""
+    existing = set()
+    for name in store.list_bloggers():
+        homepage = store.read_homepage(name)
+        uid = platform.user_id_of(homepage) if homepage else ''
+        if uid:
+            existing.add(uid)
+
+    items = []
+    for user in users:
+        item = dict(user)
+        item['downloaded'] = bool(item.get('uid') and item.get('uid') in existing)
+        items.append(item)
+    return items
+
+
+def run_following(platform_key, task):
+    """
+    抓取「当前登录账号」的关注列表
+
+    只产出博主主页链接，交给前端勾选后再走正常抓取下载流程；
+    不创建任何博主目录，也不写 homepage.txt。
+    """
+    platform = registry.get(platform_key)
+    if platform is None or not getattr(platform, 'supports_following', False):
+        raise ValueError('该平台暂未支持抓取关注列表')
+
+    task.set_platform(platform.key, platform.label)
+    task.set_name('我的关注')
+    task.set_phase('following')
+
+    result = platform.following(platform.options(),
+                                on_progress=task.push,
+                                should_stop=task.stop_flag.is_set) or {}
+
+    if task.stop_flag.is_set() or result.get('cancelled'):
+        task.mark('cancelled', '已取消，关注列表未入队')
+        return
+
+    users = result.get('users') or []
+    owner = (result.get('owner') or '').strip()
+    if owner:
+        task.set_name('{} 的关注'.format(owner))
+    if not users:
+        task.mark('error', '没有抓到关注列表：可能登录态失效，'
+                           '或当前账号没有关注任何人')
+        return
+
+    store = BloggerStore(download_root(), platform.key)
+    task.set_following(mark_downloaded(platform, store, users))
+    task.mark('done', '关注列表抓取完成，共 {} 位'.format(len(users)))

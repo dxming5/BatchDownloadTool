@@ -10,6 +10,7 @@
 - **多平台合一**：抖音、小红书、微博共用一套界面与目录结构，博主列表按平台分组，可用下拉框筛选；新增平台只需补平台实现
 - **多链接批量抓取**：输入框支持一次粘贴多个链接（换行、空格、中英文逗号/分号/顿号都可分隔），自动去重后串行执行，单条失败不影响后续
 - **一键更新**：抓取过的博主会记住主页链接，之后点「更新」即可增量补全；也可按平台批量更新全部博主
+- **关注列表批量下载**：读取本机已登录账号的关注列表，勾选想下的博主后一次性加入队列（当前支持抖音，其他平台的接口已预留）
 - **作品预览**：点击博主行即可在右侧预览，默认显示图片，可切到视频；支持缩略图懒加载、视频封面取帧、大图/视频灯箱（键盘 `←` `→` 切换、`Esc` 关闭）
 - **任务实时反馈**：进度条、日志、失败列表（可一键复制失败 URL）实时刷新，任务可随时取消
 
@@ -118,7 +119,7 @@ python web_app.py
 启动后控制台会打印实际下载目录与 Web 地址，并自动打开浏览器（端口被占用时按 `port_range` 向后顺延）。
 
 - 缺少 Flask 时启动直接提示安装依赖
-- 未安装 Playwright 时界面仍可浏览已下载内容，但「抓取并下载」「更新」按钮会被禁用
+- 未安装 Playwright 时界面仍可浏览已下载内容，但「下载」「更新」按钮会被禁用
 
 ## 使用说明
 
@@ -126,9 +127,9 @@ python web_app.py
 
 ### 下载
 
-1. 粘贴博主主页链接（可一次粘贴多个，每行一个；也可用空格/中英文逗号/分号/顿号分隔，自动去重）
+1. 标题右侧下拉框选「链接下载」，粘贴博主主页链接（可一次粘贴多个，每行一个；也可用空格/中英文逗号/分号/顿号分隔，自动去重）
 2. 选择「全部作品」或「最近一个月」
-3. 点「抓取并下载」，或按 `Ctrl/⌘ + Enter` 提交
+3. 点「下载」，或按 `Ctrl/⌘ + Enter` 提交
 4. 进度条与日志实时显示抓取页数、累计条数与下载进度；发现下载失败时展开「下载失败」列表，可一键复制失败 URL
 
 支持三种链接：
@@ -164,6 +165,17 @@ python web_app.py
 - 执行前弹确认框显示博主数量；任务可随时取消，取消后队列清空
 - 整批共用一块日志框，结束时汇总「已完成 N 位，失败 M 位」并刷新列表
 
+### 关注列表批量下载
+
+「下载」卡片标题右侧的下拉框可切换两种下载方式：**链接下载**（粘贴主页链接）和**关注列表下载**。后者由「获取我的关注」读取本机浏览器数据目录里**已登录账号**的关注列表（当前支持抖音，不支持的平台不会出现在模式下拉里）：
+
+- 关注列表只读取博主链接，不下载任何内容；抓完点「关注列表（N）」展开浮层勾选（浮层绝对定位，不占页面高度），再点同一个「下载」按钮入队
+- 已下载过的博主标「已下载」且默认不勾，避免重复排队；「全选」只作用于清单里的博主
+- 入队后复用批量抓取：逐位博主串行执行，单条失败不中断，结束时汇总「已完成 N 位，失败 M 位」
+- 抓取范围按上方的「全部作品 / 最近一个月」执行；已下载的作品仍由 `aweme_id.txt` 去重
+- 关注列表只有登录后才可见：首次使用需把对应平台段的 `headless` 改为 `false` 扫码登录
+- 新增平台支持时只需实现 `Platform.following()` 并把 `supports_following` 置为 `True`，路由与界面自动生效
+
 ## 抓取说明（通用）
 
 - 登录态按平台隔离，统一放在 `.pw_profile/` 下的平台子目录（可用 `conf/config.ini` 对应平台段的 `profile_dir` 改），**每个平台只需扫码登录一次**，之后无头运行即可
@@ -181,6 +193,7 @@ python web_app.py
 - 匿名态抖音只放出首屏约一页，因此抓到首屏后如果未登录会先等扫码，登录成功后重新加载主页再翻页
 - 类型判定按 `aweme_type`（`image_types` / `video_types` 可配）；图片取每张 `url_list` 的第一个地址，视频取 `play_addr.url_list` 的第一个（同一文件的其余地址是备用 CDN，不能都下）
 - 采集时按 `aweme_id` 去重，滚动容器逐层推进；连续 `idle_rounds` 次无新增即停止
+- **关注列表**：不手工构造请求，打开 `https://www.douyin.com/user/self?showTab=following` 后监听 `/aweme/v1/web/user/following/list/` 的响应体，滚动触发翻页；接口一直没响应时退化为扫描页面上的用户链接
 
 ## 小红书说明
 
@@ -245,6 +258,9 @@ python web_app.py
 | `max_scroll` | `400` | 最大滚动次数（微博按翻页次数使用） |
 | `idle_rounds` | `8` | 连续多少次滚动无新增就停止 |
 | `month_days` | `30` | 「最近一个月」对应的天数 |
+| `following_max_scroll` | `200` | 关注列表最多翻多少页，防止接口异常时死循环 |
+| `following_limit` | `0` | 关注列表最多取多少人，`0` 表示不限 |
+| `following_interval` | `1.0` | 关注列表翻页间隔（秒） |
 | `browser_channel` | 空 | 留空用内置 Chromium，可填 `msedge` / `chrome`；指定通道不可用时自动回退内置 Chromium |
 | `proxy` | 空 | 代理地址，如 `http://127.0.0.1:7890`；留空不使用 |
 | `timeout_ms` | `30000` | 页面加载超时（毫秒） |
@@ -288,14 +304,14 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `web_app.py` | 程序入口：寻找空闲端口、启动 Flask、自动打开浏览器 |
 | `conf/settings.py` | 配置读取（固定读 `conf/config.ini`，按平台分段并合并默认值） |
 | `core/task.py` | 任务状态、进度、日志、失败清单、取消、快照；百分比按 `done/total` 换算 |
-| `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.assemble()` |
+| `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.assemble()`；关注列表走独立的 `run_following()` |
 | `core/registry.py` | 平台注册表（key、显示名、链接识别） |
 | `core/store.py` | 博主目录、ID 记录、主页链接、博主列举（无全局路径态） |
 | `core/naming.py` | 时间戳转文件名前缀 |
 | `core/browser.py` | 通用浏览器能力（持久化上下文、滚动、登录态判断、登录等待、响应 JSON） |
 | `core/downloader.py` | 单地址下载（重试、清理半成品、`.part` 与扩展名探测）与批量并发调度 `fetch_all` |
 | `core/utils.py` | UTF-8 编码配置、文本读写、建目录、安全文件名 |
-| `platforms/base.py` | 平台接口约定（`match` / `parse_target` / `scrape` / `assemble` / `headers` / `post_process` / `options`） |
+| `platforms/base.py` | 平台接口约定（`match` / `parse_target` / `scrape` / `assemble` / `headers` / `post_process` / `options`；可选 `following` / `user_id_of`） |
 | `platforms/__init__.py` | 注册全部平台（新增平台在此加一行） |
 | `platforms/douyin/` | 抖音：链接解析、接口响应监听、滚动翻页、类型判定、取址与下载组装 |
 | `platforms/xiaohongshu/` | 小红书：首屏 SSR + 接口分页、逐条取详情、图文/视频判定、去水印、HEIC 转 JPG |
@@ -357,6 +373,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 2. 新建 `platforms/<key>/__init__.py`，继承 `platforms/base.py` 的 `Platform`，声明 `key`、`label`、`media_label` 并实现 `match` / `parse_target` / `scrape` / `assemble`
 3. 在 `platforms/__init__.py` 中 `import` 并 `registry.register(...)`；前端平台下拉框与博主分组会自动出现，无需改前端
 4. 登录态目录默认落在 `.pw_profile/<key>`，无需额外配置；需要专属下载头时实现 `headers()`，需要落盘后处理时实现 `post_process()`
+5. 需要支持「关注列表」时再实现 `following()` 与 `user_id_of()`，并把 `supports_following` 置为 `True`；路由与前端按钮会自动出现（可选）
 
 ## Web API
 
@@ -367,6 +384,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `GET` | `/` | 首页；按静态资源内容注入版本号与配置里的标题 |
 | `GET` | `/api/status` | 博主总数、当前任务快照、Playwright 是否可用、已注册平台列表 |
 | `POST` | `/api/scrape` | 提交一个链接抓取并下载；`range` 为 `all` / `month` |
+| `POST` | `/api/following` | 读取本机登录账号的关注列表（`platform`，当前仅 `douyin`）；只返回清单，不触发下载 |
 | `GET` | `/api/tasks/<task_id>` | 任务快照（进度、日志、失败列表） |
 | `POST` | `/api/tasks/<task_id>/cancel` | 取消任务 |
 | `GET` | `/api/bloggers` | 按平台分组返回博主列表与主页链接 |
@@ -384,8 +402,10 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 | 现象 | 处理 |
 |---|---|
-| 「抓取并下载」按钮灰色 | 未安装 Playwright：`pip install playwright` 与 `playwright install chromium` 后重启 |
+| 「下载」按钮灰色 | 未安装 Playwright：`pip install playwright` 与 `playwright install chromium` 后重启；关注模式下还没勾选博主时也是灰色 |
 | 提示未登录 / 只抓到少量内容 | 把对应平台段的 `headless` 设为 `false`，重启后在弹出的浏览器窗口扫码 |
+| 点「获取我的关注」提示未登录 | 关注列表只有登录后才可见：把对应平台段的 `headless` 改为 `false`，重启后扫码 |
+| 「获取我的关注」按钮灰色 | 没有平台支持关注列表（当前仅抖音），或已有任务在执行；也可先确认 Playwright 已安装 |
 | 小红书笔记打不开详情 | 主页链接的 `xsec_token` 已过期，重新复制主页链接抓取一次 |
 | 微博图片全部下载失败（403） | 把 `[platforms.weibo] referer` 改成 `https://weibo.com/` |
 | 下载到一半被限流、大量失败 | 把 `[download] workers` 调小（`1` 即逐个下载） |

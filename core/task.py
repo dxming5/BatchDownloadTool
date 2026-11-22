@@ -21,7 +21,8 @@ class Task(object):
         self.platform_label = platform_label
         self.blogger = target
         self.mode = mode
-        self.phase = 'scrape'          # scrape / download，前端据此显示阶段
+        # scrape / download / following，前端据此显示阶段与文案
+        self.phase = 'scrape'
         self.status = 'running'        # running / done / cancelled / error
         self.percent = 0
         self.done = 0
@@ -32,6 +33,8 @@ class Task(object):
         self.scrape_pages = 0
         self.scrape_count = 0
         self.unknown_types = {}
+        self.following = []            # 关注列表结果（结束时一次性写入）
+        self.following_count = 0
         self.logs = collections.deque(maxlen=300)
         self.failures = []
         self.started = time.time()
@@ -54,6 +57,12 @@ class Task(object):
         with self._lock:
             self.phase = phase
 
+    def set_following(self, users):
+        """关注列表结果；只在抓取结束时写一次，避免轮询反复传大 JSON"""
+        with self._lock:
+            self.following = list(users or [])
+            self.following_count = len(self.following)
+
     def push(self, event):
         """接收抓取或下载的进度回调"""
         stage = event.get('stage')
@@ -75,6 +84,12 @@ class Task(object):
                 self.scrape_pages = event.get('pages', self.scrape_pages)
                 self.scrape_count = event.get('count', self.scrape_count)
                 self.logs.append('抓取完成，共 {} 条作品'.format(self.scrape_count))
+            elif stage == 'following':
+                self.phase = 'following'
+                self.following_count = event.get('count', self.following_count)
+                message = (event.get('message') or '').strip()
+                if message and (not self.logs or self.logs[-1] != message):
+                    self.logs.append('关注列表：{}'.format(message))
             elif stage == 'start':
                 self.video_total = event.get('video_total', 0)
                 self.picture_total = event.get('picture_total', 0)
@@ -135,6 +150,8 @@ class Task(object):
                 'video_total': self.video_total,
                 'picture_total': self.picture_total,
                 'unknown_types': dict(self.unknown_types),
+                'following': list(self.following),
+                'following_count': self.following_count,
                 'logs': list(self.logs),
                 'failures': list(self.failures),
                 'elapsed': int(time.time() - self.started),

@@ -23,7 +23,7 @@ from markupsafe import escape
 import platforms  # noqa: F401  导入即注册平台
 from conf import settings
 from core import registry
-from core.pipeline import run as run_pipeline
+from core.pipeline import run as run_pipeline, run_following
 from core.store import BloggerStore, download_root
 from core.task import Task
 from core.utils import make_dir, rm_dir
@@ -51,10 +51,13 @@ def _scraper_ready():
 
 
 def _run_task(task, url, month_days):
-    """后台线程：执行一次抓取并下载，异常必须兜住，否则前端会一直轮询"""
+    """后台线程：按任务模式执行，异常必须兜住，否则前端会一直轮询"""
     global _ACTIVE
     try:
-        run_pipeline(url, month_days, task)
+        if task.mode == 'following':
+            run_following(task.platform_key, task)
+        else:
+            run_pipeline(url, month_days, task)
     except ImportError as error:
         task.mark('error', '未安装 playwright 组件（{}）：请执行 '
                            'pip install playwright 与 playwright install chromium'.format(error))
@@ -83,6 +86,29 @@ def _start_task(url, month_days):
         _ACTIVE = task
 
     threading.Thread(target=_run_task, args=(task, url, month_days), daemon=True).start()
+    return task, ''
+
+
+def _start_platform_task(platform_key, mode='following'):
+    """按平台直接起任务（没有目标链接，如「我的关注」）；已有任务时返回 (None, 原因)"""
+    global _ACTIVE
+    platform = registry.get(platform_key)
+    if platform is None:
+        return None, '无法识别的平台'
+    if not getattr(platform, 'supports_following', False):
+        return None, '「{}」暂未支持抓取关注列表'.format(platform.label)
+    with _LOCK:
+        if _ACTIVE is not None and _ACTIVE.is_running():
+            return None, '已有任务在执行，请等待或先取消'
+        task = Task(target='我的关注',
+                    platform_key=platform.key,
+                    platform_label=platform.label,
+                    mode=mode)
+        _TASKS[task.id] = task
+        _trim_tasks()
+        _ACTIVE = task
+
+    threading.Thread(target=_run_task, args=(task, '', 0), daemon=True).start()
     return task, ''
 
 
@@ -173,7 +199,8 @@ def create_app():
             'blogger_count': count,
             'active_task': active,
             'scrape_ready': _scraper_ready(),
-            'platforms': [{'key': p.key, 'label': p.label}
+            'platforms': [{'key': p.key, 'label': p.label,
+                           'following': bool(getattr(p, 'supports_following', False))}
                           for p in registry.all_platforms()],
         })
 
@@ -207,6 +234,31 @@ def create_app():
         month_days = (platform.options().get('month_days') or 30) if want_month else 0
 
         task, error = _start_task(raw, month_days)
+        if not task:
+            return jsonify({'error': error}), 409
+        return jsonify({'task_id': task.id, 'task': task.snapshot()}), 202
+
+    # ---------------- 关注列表 ----------------
+
+    @app.post('/api/following')
+    def api_following():
+        """读取本机已登录账号的关注列表；只返回清单，不触发下载"""
+        payload = request.get_json(silent=True) or {}
+        platform_key = (payload.get('platform') or 'douyin').strip()
+        platform = registry.get(platform_key)
+        if platform is None:
+            return jsonify({'error': '无法识别的平台'}), 400
+        if not getattr(platform, 'supports_following', False):
+            return jsonify({
+                'error': '「{}」暂未支持抓取关注列表'.format(platform.label)
+            }), 400
+        if not _scraper_ready():
+            return jsonify({
+                'error': '未安装 playwright：请执行 pip install playwright '
+                         '与 playwright install chromium 后重启服务'
+            }), 503
+
+        task, error = _start_platform_task(platform_key, mode='following')
         if not task:
             return jsonify({'error': error}), 409
         return jsonify({'task_id': task.id, 'task': task.snapshot()}), 202

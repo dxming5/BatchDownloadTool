@@ -10,6 +10,7 @@ class DouyinPlatform(Platform):
     key = 'douyin'
     label = '抖音'
     media_label = '抖音作品'
+    supports_following = True
 
     def __init__(self):
         self._options = None
@@ -45,6 +46,23 @@ class DouyinPlatform(Platform):
             should_stop=should_stop,
             media_label=media_label or self.media_label,
         )
+
+    # ---------------- 关注列表 ----------------
+
+    def following(self, options, on_progress=None, should_stop=None):
+        """抓当前登录账号的关注列表（只出链接，不下载）"""
+        return scraper.fetch_following(
+            options=options,
+            on_progress=on_progress,
+            should_stop=should_stop,
+            verbose=False,
+        )
+
+    def user_id_of(self, url):
+        try:
+            return scraper.parse_sec_user_id(url)
+        except ValueError:
+            return ''
 
     def headers(self):
         return assemble.headers()
