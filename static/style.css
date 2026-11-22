@@ -385,6 +385,26 @@ textarea {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;
+  /* 博主名 + 百分比横排：名字可收缩，百分比不收缩 */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 16px);
+}
+
+.progress-name {
+  min-width: 0; /* 允许收缩，否则 ellipsis 不生效 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-name:empty {
+  display: none; /* 抓取阶段没有名字时不留 gap 空隙 */
+}
+
+.progress-value {
+  flex: none; /* 百分比与条数永远完整显示 */
 }
 
 .log {

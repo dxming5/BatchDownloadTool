@@ -412,10 +412,13 @@
     var percent = (scraping || following) ? 0 : (task.percent || 0);
     $('bar').style.width = percent + '%';
 
-    /* 条上文字只表示当前任务的进度；关注列表阶段显示已抓到的人数 */
-    $('progressText').textContent = following
-      ? '已抓取 ' + (task.following_count || 0) + ' 人'
-      : percent + '%（' + (task.done || 0) + '/' + (task.total || 0) + '）';
+    /* 条上文字只表示下载进度，抓取与关注列表阶段不另报人数 */
+    $('progressValue').textContent =
+      percent + '%（' + (task.done || 0) + '/' + (task.total || 0) + '）';
+
+    /* 下载阶段在百分比前带上博主名：抓取阶段这里还是链接里的 uid，不显示 */
+    $('progressName').textContent =
+      (!scraping && !following && task.blogger) ? task.blogger + ' ·' : '';
 
     /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
     if (!state.batch && state.lastPhase && state.lastPhase !== task.phase) {
