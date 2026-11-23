@@ -198,32 +198,21 @@ def media_files(key, name, exts):
     return found
 
 
-def blogger_names(key, video_exts=('.mp4',)):
-    """平台目录下符合博主目录特征的一级子目录名；判定规则与旧版一致"""
-    base = platform_dir(key)
-    try:
-        entries = sorted(os.listdir(base))
-    except OSError:
-        return []
+def is_blogger_dir(key, name, video_exts=('.mp4',)):
+    """该目录是否符合博主目录特征：有主页链接、有图片目录或有视频文件
 
-    found = []
-    for entry in entries:
-        if entry.startswith('.'):
-            continue
-        full = os.path.join(base, entry)
-        if not os.path.isdir(full):
-            continue
-        if os.path.isfile(os.path.join(full, HOMEPAGE_NAME)):
-            found.append(entry)
-            continue
-        if os.path.isdir(os.path.join(full, PICTURE_DIR_NAME)):
-            found.append(entry)
-            continue
-        try:
-            has_video = any(name.lower().endswith(video_exts)
-                            for name in os.listdir(full))
-        except OSError:
-            has_video = False
-        if has_video:
-            found.append(entry)
-    return found
+    只看一级目录内容，不递归；「有哪些博主」由业务层列举平台目录后
+    逐个调用本函数判定，本模块不承担集合语义。
+    """
+    full = blogger_dir(key, name)
+    if not full or not os.path.isdir(full):
+        return False
+    if os.path.isfile(os.path.join(full, HOMEPAGE_NAME)):
+        return True
+    if os.path.isdir(os.path.join(full, PICTURE_DIR_NAME)):
+        return True
+    exts = tuple(ext.lower() for ext in video_exts)
+    try:
+        return any(entry.lower().endswith(exts) for entry in os.listdir(full))
+    except OSError:
+        return False

@@ -11,6 +11,10 @@
         取博主名、ID 记录与落盘路径，彼此之间不再传递博主对象。
 """
 
+import os
+
+from pypinyin import lazy_pinyin
+
 from core import paths
 from core.utils import append_list_txt, make_txt, read_txt, rm_dir
 
@@ -99,10 +103,39 @@ def ensure(key, name):
     return Blogger(key, name).create()
 
 
+def blogger_order(name):
+    """博主名展示排序键：符号最前，其次数字，最后字母与汉字按拼音升序
+
+    首字符决定分组（符号/标点/emoji → 数字 → 字母与汉字），组内用
+    lazy_pinyin 转换后比较并忽略大小写；这样「“符”LL」「🥑」这类以
+    符号开头的名字不会因为码点大而被甩到列表末尾。
+    """
+    text = (name or '').lower()
+    head = text[:1]
+    if not head or not head.isalnum():
+        group = 0                       # 符号、标点、emoji
+    elif head.isdigit():
+        group = 1                       # 数字
+    else:
+        group = 2                       # 字母与汉字
+    return group, lazy_pinyin(text)
+
+
 def platform_bloggers(key, video_exts=('.mp4',)):
-    """平台目录下的博主列表；判定规则见 core.paths"""
-    return [Blogger(key, name)
-            for name in paths.blogger_names(key, video_exts)]
+    """平台目录下的博主列表：仅有下载内容的目录，按 blogger_order 排序
+
+    列举平台目录属于集合语义，由本模块做；「一个目录算不算博主目录」
+    仍交给 core.paths 判定，路径与布局规则不在本模块重复。
+    """
+    try:
+        entries = os.listdir(paths.platform_dir(key))
+    except OSError:
+        return []
+    bloggers = [Blogger(key, name) for name in entries
+                if not name.startswith('.')
+                and paths.is_blogger_dir(key, name, video_exts)]
+    bloggers.sort(key=lambda blogger: blogger_order(blogger.name))
+    return bloggers
 
 
 # ---------------- 当前任务目标 ----------------

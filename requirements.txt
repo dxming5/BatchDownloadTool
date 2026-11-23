@@ -3,3 +3,5 @@ Flask>=2.2
 playwright>=1.40
 # 小红书 HEIC 图片转 JPG 用；未安装时保留原文件，不影响其他功能
 pillow-heif>=0.10.0
+# 博主列表按拼音排序用
+pypinyin>=0.49
