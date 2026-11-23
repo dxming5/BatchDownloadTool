@@ -2,89 +2,48 @@
 """
 存储模块
 
-唯一掌握磁盘布局的对象，取代原来的全局路径变量：
+博主身份、记录文件与「当前任务目标」。磁盘布局全部在 core.paths，本模块
+不做任何路径运算：
 
-    下载根/
-    └── <平台 key>/
-        └── <博主名>/
-            ├── homepage.txt   主页链接
-            ├── aweme_id.txt   本博主已下载作品 ID，一篇一行
-            ├── *.mp4
-            ├── picture/       图片
-            └── .cache/        预览缓存（缩略图、视频封面）
-
-下载根来自配置；平台目录名即平台 key；博主目录的判定规则与旧版一致
-（有 homepage.txt、有 picture/ 目录、或直接存在视频文件）。
+    Blogger：只持「平台 key + 博主名」，记录文件（homepage.txt / aweme_id.txt）
+        由它读写，位置一律问 core.paths；
+    当前任务目标：编排层 activate、结束 clear，下载层与平台层据此向 store
+        取博主名、ID 记录与落盘路径，彼此之间不再传递博主对象。
 """
 
-import os
-
-from conf import settings
-from core.utils import make_dir, make_txt, read_txt, append_list_txt, rm_dir, safe_name
+from core import paths
+from core.utils import append_list_txt, make_txt, read_txt, rm_dir
 
 
-HOMEPAGE_NAME = 'homepage.txt'
-ID_RECORD_NAME = 'aweme_id.txt'      # 保留原名，避免已有下载记录失效
-PICTURE_DIR_NAME = 'picture'
+class Blogger(object):
+    """一位博主：身份是「平台标识 + 博主名」，位置与记录文件都由 paths 给出"""
 
+    def __init__(self, key, name):
+        self.key = key
+        self.name = paths.blogger_name(name)
 
-def download_root():
-    """当前生效的下载根目录（不存在时创建）"""
-    root = settings.CONFIGURED_DOWNLOAD_DIR
-    make_dir(root)
-    return os.path.abspath(root)
-
-
-def _resolve_safely(base, name):
-    """把 name 解析为 base 下的绝对路径；越界或非法名返回 None"""
-    parts = (name or '').replace('\\', '/').split('/')
-    if not name or any(part.startswith('.') for part in parts):
-        return None
-    root = os.path.realpath(base)
-    target = os.path.realpath(os.path.join(root, name))
-    if target == root or not target.startswith(root + os.sep):
-        return None
-    return target
-
-
-class BloggerStore(object):
-    """某个平台下的博主存储（实例状态，不做模块级共享）"""
-
-    def __init__(self, root, platform_key):
-        self.root = os.path.abspath(root)
-        self.platform_key = platform_key
+    def __str__(self):
+        return self.name
 
     # ---------------- 目录 ----------------
 
-    def platform_root(self, create=False):
-        path = os.path.join(self.root, self.platform_key)
-        if create:
-            make_dir(path)
-        return path
+    def _existing(self, create=False):
+        """校验后的博主目录；名字非法、越界或不存在（未要求创建）返回 None"""
+        return paths.existing_dir(self.key, self.name, create)
 
-    def blogger_dir(self, name, create=False):
-        """博主目录绝对路径；名字非法或越界返回 None"""
-        base = self.platform_root(create=create)
-        target = _resolve_safely(base, safe_name(name))
-        if not target:
+    def exists(self):
+        return self._existing() is not None
+
+    def create(self):
+        """创建博主目录与 ID 记录文件，成功返回自身，失败返回 None"""
+        if not self._existing(create=True):
             return None
-        if create:
-            make_dir(target)
-        return target if os.path.isdir(target) else None
+        make_txt(paths.ids_path(self.key, self.name))
+        return self
 
-    def ensure(self, name):
-        """创建博主目录与 ID 记录文件，返回目录路径"""
-        target = self.blogger_dir(name, create=True)
-        if target:
-            make_txt(os.path.join(target, ID_RECORD_NAME))
-        return target
-
-    def exists(self, name):
-        return self.blogger_dir(name) is not None
-
-    def delete(self, name):
-        """删除博主目录（连同 .cache）"""
-        target = self.blogger_dir(name)
+    def delete(self):
+        """删除博主目录（连同缓存目录）"""
+        target = self._existing()
         if not target:
             return False
         rm_dir(target)
@@ -92,78 +51,117 @@ class BloggerStore(object):
 
     # ---------------- 去重记录 ----------------
 
-    def ids_path(self, name):
-        target = self.blogger_dir(name, create=True)
-        return os.path.join(target, ID_RECORD_NAME) if target else None
+    def read_ids(self):
+        if not self._existing():
+            return set()
+        return set(read_txt(paths.ids_path(self.key, self.name)))
 
-    def read_ids(self, name):
-        path = self.ids_path(name)
-        return set(read_txt(path)) if path else set()
-
-    def append_ids(self, name, ids):
-        path = self.ids_path(name)
-        if path and ids:
-            append_list_txt(path, list(ids))
+    def append_ids(self, ids):
+        if self._existing() and ids:
+            append_list_txt(paths.ids_path(self.key, self.name), list(ids))
 
     # ---------------- 主页链接 ----------------
 
-    def homepage_path(self, name):
-        target = self.blogger_dir(name, create=True)
-        return os.path.join(target, HOMEPAGE_NAME) if target else None
-
-    def save_homepage(self, name, url):
-        path = self.homepage_path(name)
-        if not path or not (url or '').strip():
+    def save_homepage(self, url):
+        url = (url or '').strip()
+        if not url or not self._existing(create=True):
             return ''
+        path = paths.homepage_path(self.key, self.name)
         with open(path, mode='w', encoding='utf-8') as handle:
-            handle.write(url.strip() + '\n')
+            handle.write(url + '\n')
         return path
 
-    def read_homepage(self, name):
-        target = self.blogger_dir(name)
-        if not target:
-            return ''
-        path = os.path.join(target, HOMEPAGE_NAME)
-        if not os.path.isfile(path):
+    def read_homepage(self):
+        if not self._existing():
             return ''
         try:
-            with open(path, mode='r', encoding='utf-8') as handle:
+            with open(paths.homepage_path(self.key, self.name),
+                      mode='r', encoding='utf-8') as handle:
                 return handle.read().strip()
         except OSError:
             return ''
 
-    # ---------------- 列举 ----------------
+    def item(self):
+        """列表项：目录名即博主名，附带登记过的主页链接"""
+        return {'name': self.name, 'homepage': self.read_homepage()}
 
-    def list_bloggers(self, video_exts=('.mp4',)):
-        """平台目录下的博主名列表；判定规则与旧版一致"""
-        base = self.platform_root()
-        try:
-            entries = sorted(os.listdir(base))
-        except OSError:
-            return []
 
-        names = []
-        for entry in entries:
-            if entry.startswith('.'):
-                continue
-            full = os.path.join(base, entry)
-            if not os.path.isdir(full):
-                continue
-            if os.path.isfile(os.path.join(full, HOMEPAGE_NAME)):
-                names.append(entry)
-                continue
-            if os.path.isdir(os.path.join(full, PICTURE_DIR_NAME)):
-                names.append(entry)
-                continue
-            try:
-                has_video = any(item.lower().endswith(video_exts)
-                                for item in os.listdir(full))
-            except OSError:
-                has_video = False
-            if has_video:
-                names.append(entry)
-        return names
+# ---------------- 入口 ----------------
 
-    def blogger_item(self, name):
-        """博主列表项：目录名即博主名，附带登记过的主页链接"""
-        return {'name': name, 'homepage': self.read_homepage(name)}
+def blogger(key, name):
+    """按 (平台标识, 博主名) 取已存在的博主；非法或不存在返回 None"""
+    candidate = Blogger(key, name)
+    return candidate if candidate.exists() else None
+
+
+def ensure(key, name):
+    """创建博主目录与 ID 记录文件，返回博主对象；名字不可用返回 None"""
+    return Blogger(key, name).create()
+
+
+def platform_bloggers(key, video_exts=('.mp4',)):
+    """平台目录下的博主列表；判定规则见 core.paths"""
+    return [Blogger(key, name)
+            for name in paths.blogger_names(key, video_exts)]
+
+
+# ---------------- 当前任务目标 ----------------
+#
+# 一次任务只有一个博主：编排层定位目录后 activate，结束时 clear。
+# 下载层与平台层据此直接向 store 取博主名、ID 记录与落盘路径，
+# 不再接收博主对象，也不接收任何目录参数。单任务是本模块的前提。
+
+_current = None
+
+
+def activate(target):
+    """登记本次任务的目标博主；重复登记视为编排层出错"""
+    global _current
+    if _current is not None:
+        raise RuntimeError('上一任务未清理目标：{}'.format(_current.name))
+    _current = target
+
+
+def clear():
+    """任务结束时清空目标"""
+    global _current
+    _current = None
+
+
+def current():
+    """当前任务目标；未激活时返回 None"""
+    return _current
+
+
+def _active(action):
+    if _current is None:
+        raise RuntimeError('下载目标未激活：编排层未调用 store.activate()')
+    return _current
+
+
+def name():
+    """当前任务目标的博主名；未激活返回空串"""
+    return _current.name if _current else ''
+
+
+def read_ids():
+    """当前任务目标已记录的篇 ID；未激活返回空集合"""
+    return _current.read_ids() if _current else set()
+
+
+def id_recorder():
+    """记 ID 回调：绑定当前目标，任务清理后仍能安全写入（取消兜底）"""
+    return _active('记 ID').append_ids
+
+
+def part_path(create_time, index):
+    """下载中的临时文件路径（当前任务目标）"""
+    target = _active('取临时路径')
+    return paths.part_path(target.key, target.name, create_time, index)
+
+
+def media_path(create_time, index, ext, is_video):
+    """最终落盘路径（当前任务目标）"""
+    target = _active('取落盘路径')
+    return paths.media_path(target.key, target.name, create_time, index,
+                            ext, is_video)

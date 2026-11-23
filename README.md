@@ -43,10 +43,9 @@ BatchDownloadTool/
 │   ├── task.py                # 任务状态、进度、日志、失败清单、取消
 │   ├── pipeline.py            # 编排：认平台 → 抓取 → 定位存储 → 交给平台组装
 │   ├── registry.py            # 平台注册表（key / 显示名 / 链接识别）
-│   ├── store.py               # 博主目录、去重记录、主页链接
-│   ├── naming.py              # 时间格式与落盘命名
+│   ├── store.py               # 磁盘布局（博主对象）、去重记录、主页链接
 │   ├── browser.py             # 通用浏览器能力（启动、滚动、登录态、登录等待）
-│   ├── downloader.py          # 单地址下载（重试、扩展名探测、.part）+ 并发调度
+│   ├── downloader.py          # 单地址下载（重试、扩展名探测、.part、文件名拼装）+ 并发调度
 │   └── utils.py               # 编码、文本读写、目录与文件名工具
 ├── platforms/                 # 平台实现层
 │   ├── __init__.py            # 注册全部平台（新增平台在这里加一行）
@@ -65,8 +64,7 @@ BatchDownloadTool/
 │       └── assemble.py        # 类型判定、pics → large.url / page_info → 视频地址
 ├── web/
 │   ├── app.py                 # 路由（任务、博主、预览、封面上传）
-│   ├── media_api.py           # 媒体响应（按区间读文件、缩略图）
-│   └── media_cache.py         # 缩略图与视频封面的落盘缓存
+│   └── media_api.py           # 媒体响应（按区间读文件、缩略图与封面缓存）
 ├── static/                    # 前端单页（原生 HTML/CSS/JS，无需构建）
 │   ├── index.html
 │   ├── app.js
@@ -105,6 +103,7 @@ BatchDownloadTool/
 - 相对路径按**启动程序时所在的工作目录**解析，换目录启动会指向不同位置，建议直接写绝对路径
 - 每个博主一个目录 `{download_dir}/{平台 key}/{博主名}/`，不存在时自动创建
 - 平台目录下的一级子目录中，含 `homepage.txt`、`picture/` 或有视频文件才算博主；零散文件与 `.cache/` 等隐藏目录会被忽略
+- 目录结构只由 `core/paths.py` 计算与提供：博主目录、图片目录、缓存目录、落盘路径与「这是不是缓存文件」的判定都由它给出，其它模块不拼目录、不接收目录参数
 - 把已有的博主目录整个拷进对应平台目录，重启后界面即可识别并预览（缺 `homepage.txt` 时「更新」按钮不可用）
 - 从旧版本升级：把 `download_dir` 的末尾去掉一级平台目录即可（例如原来填 `F:/图片/douyin/`，改为 `F:/图片/`），原有博主目录会直接成为平台目录，无需移动文件
 
@@ -297,7 +296,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 项目按「公用层 + 平台实现层」组织：公用层只写机制（任务、编排、存储、命名、浏览器、单文件下载、媒体），平台层写规则与下载流程（链接识别、列表采集、类型判定、取地址、命名材料、进度上报）。
 
-关键约定：**抓取结果不做统一转换**。`platform.scrape()` 返回平台自己的原始结构，`platform.assemble(result, store, ...)` 原样接收，由平台按自己的字段挑条目、取地址、命名。公用层不引入跨平台的中间数据结构，也就不会因为某个平台的字段差异反过来改核心代码。
+关键约定：**抓取结果不做统一转换**。`platform.scrape()` 返回平台自己的原始结构，`platform.assemble(result, ...)` 原样接收，由平台按自己的字段挑条目、取地址、命名；博主名与 ID 记录从 `store` 取，平台不收博主对象。公用层不引入跨平台的中间数据结构，也就不会因为某个平台的字段差异反过来改核心代码。
 
 | 模块 | 职责 |
 |---|---|
@@ -306,10 +305,10 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `core/task.py` | 任务状态、进度、日志、失败清单、取消、快照；百分比按 `done/total` 换算 |
 | `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.assemble()`；关注列表走独立的 `run_following()` |
 | `core/registry.py` | 平台注册表（key、显示名、链接识别） |
-| `core/store.py` | 博主目录、ID 记录、主页链接、博主列举（无全局路径态） |
-| `core/naming.py` | 时间戳转文件名前缀 |
+| `core/paths.py` | 磁盘布局的唯一出处：下载根、平台目录、博主目录、`picture/` 与缓存目录、落盘与缓存文件路径、相对/绝对互转、越界校验、博主目录判定 |
+| `core/store.py` | 博主身份与记录：`Blogger` 只持平台 key + 博主名，读写 `homepage.txt` / `aweme_id.txt`；另有「当前任务目标」（`activate` / `clear`）供下载层与平台层取博主名、ID 与路径 |
 | `core/browser.py` | 通用浏览器能力（持久化上下文、滚动、登录态判断、登录等待、响应 JSON） |
-| `core/downloader.py` | 单地址下载（重试、清理半成品、`.part` 与扩展名探测）与批量并发调度 `fetch_all` |
+| `core/downloader.py` | 时间戳转文件名前缀、单地址下载（重试、清理半成品、扩展名探测）与批量并发调度 `fetch_all`；落盘路径向 `store` / `paths` 要，不拼目录 |
 | `core/utils.py` | UTF-8 编码配置、文本读写、建目录、安全文件名 |
 | `platforms/base.py` | 平台接口约定（`match` / `parse_target` / `scrape` / `assemble` / `headers` / `post_process` / `options`；可选 `following` / `user_id_of`） |
 | `platforms/__init__.py` | 注册全部平台（新增平台在此加一行） |
@@ -317,8 +316,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `platforms/xiaohongshu/` | 小红书：首屏 SSR + 接口分页、逐条取详情、图文/视频判定、去水印、HEIC 转 JPG |
 | `platforms/weibo/` | 微博：链接取 uid、扫码登录、卡片接口 `since_id` 翻页、类型判定、取址与下载组装 |
 | `web/app.py` | Flask 路由：任务、博主、预览文件、封面上传；静态资源内容指纹 |
-| `web/media_api.py` | 媒体响应（按区间读文件、缩略图、路径越界校验） |
-| `web/media_cache.py` | 缩略图与视频封面的缓存路径与生成 |
+| `web/media_api.py` | 媒体响应（按区间读文件、路径越界校验）与缩略图、视频封面的缓存 |
 | `static/` | 前端单页（原生 HTML/CSS/JS，轮询进度，博主按平台分组） |
 
 ### 下载流程
@@ -326,16 +324,16 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 一次任务严格分两阶段，**先抓完再下载**：
 
 1. `platform.scrape(target, options)` —— 平台开浏览器翻页，结果全量累加后一次性返回（抖音是接口 JSON 列表，小红书是逐条补齐的详情列表，微博是卡片接口按页累积的 mblog 列表）
-2. `platform.assemble(result, store)` —— 平台从自己返回的结构里挑出可下载条目，组装成 `(篇 ID, 发布时间, [地址])` 交给公用下载层，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.{扩展名}` 落盘；每个文件下载完成即计 1 个进度，全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`）
+2. `platform.assemble(result)` —— 平台从自己返回的结构里挑出可下载条目，组装成 `(篇 ID, 发布时间, [地址])` 交给公用下载层，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.{扩展名}` 落盘；每个文件下载完成即计 1 个进度，全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`）
 
-并发只发生在第 2 步内部：平台先算出全部落盘路径，再把这些地址交给线程池（`[download] workers`，默认 1 表示逐个下载），每个文件完成即计 1 个进度，结果回到主线程按篇聚合，全成功才记 ID。
+并发只发生在第 2 步内部：编排层在进入下载前把本次目标登记给 `store`（`activate`，任务结束 `clear`），落盘路径由 `store` 现算（临时路径、最终路径，以及视频进博主目录、图片进 `picture/` 都由它决定）。下载层只判断「视频还是图片」，向 `store` 要路径——既不接收博主对象，也不接收任何目录参数。这些地址交给线程池（`[download] workers`，默认 1 表示逐个下载），每个文件完成即计 1 个进度，结果回到主线程按篇聚合，全成功才记 ID。
 
 分工边界：
 
 | 层 | 负责 |
 |---|---|
 | 平台 `assemble()` | 挑哪些条目、取地址、算发布时间、何时记 ID；把 `(篇 ID, 发布时间, [地址])` 交给下载层 |
-| `core/downloader.py` | 校验已下载、命名落盘（按扩展名分目录）、重试与扩展名探测、批量并发调度、按实际地址数统一计算进度、按篇聚合写 ID |
+| `core/downloader.py` | 校验已下载、拼文件名、重试与扩展名探测、批量并发调度、按实际地址数统一计算进度、按篇聚合写 ID；落盘路径向 `store` 要，不拼目录 |
 | `core/task.py` | 收 `done` / `total` 换算百分比，维护日志、失败清单、取消状态 |
 | `core/pipeline.py` | 串联两阶段，处理取消与「没有可下载内容」的收尾 |
 
@@ -346,7 +344,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 - `fetch_all` 以本批**实际要下载**的地址数为分母，每个地址下载完成即 +1，通过不带 message 的 `notice` 事件上报 `done` / `total`，界面显示如 `60%（6/10）`；日志只有每地址一条「正在下载 xxx」
 - 已下载的篇由 `fetch_all` 按 `done_ids` 统一校验、直接排除，不计入总数；进度从 0 开始，不需要平台自己判断
 - 一篇内的多个媒体各自计进度；去重与断点续传仍按篇粒度：一个下载单元一个 ID（抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`），ID 由平台按篇聚合后写入
-- **新增平台必须遵守**：把条目整理成 `(篇 ID, 发布时间, [地址])` 交给 `downloader.fetch_all`，传 `blogger_dir`、`done_ids` 与回调；命名、扩展名探测、去重校验都由下载层负责，平台只管按篇聚合结果记 ID，不要自己维护 `done` / `total`
+- **新增平台必须遵守**：把条目整理成 `(篇 ID, 发布时间, [地址])` 交给 `downloader.fetch_all`，传 `done_ids` 与回调（`record_ids=store.id_recorder()`）；**不要给下载层传博主对象或任何目录**——落盘路径由 `store` 的当前任务目标给出。命名、扩展名探测、去重校验都由下载层负责，平台只管按篇聚合结果记 ID，不要自己维护 `done` / `total`；平台层不出现任何路径拼接，目录与缓存位置一律由 `store` 提供
 
 #### ID 记录约定：一篇一个 ID，全部成功才记录
 
@@ -391,8 +389,8 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | `POST` | `/api/bloggers/<platform>/<name>/update` | 用 `homepage.txt` 重新抓取，按 ID 只补新增 |
 | `DELETE` | `/api/bloggers/<platform>/<name>` | 删除博主目录（含 `.cache`）；任务进行中拒绝 |
 | `GET` | `/api/bloggers/<platform>/<name>/files` | 博主目录下的图片 / 视频清单（含缩略图与封面地址） |
-| `POST` | `/api/covers` | 前端回存视频首帧封面（`data:image/...`，上限 512KB） |
-| `GET` | `/api/media?path=&thumb=` | 媒体文件响应，支持区间读取；图片可带 `thumb` 走缩略图 |
+| `POST` | `/api/covers` | 前端回存视频首帧封面（`platform` / `name` / `path` / `data:image/...`，上限 512KB） |
+| `GET` | `/api/media?path=&thumb=&platform=&name=` | 媒体文件响应，支持区间读取；图片可带 `thumb` 走缩略图，缓存位置由 `platform` / `name` 确定 |
 
 - 最近 20 个任务快照会保留在内存中，过期返回 404
 - 缩略图与封面 URL 带文件修改时间版本号，可按内容长期缓存；其他静态资源与媒体默认每次回源校验

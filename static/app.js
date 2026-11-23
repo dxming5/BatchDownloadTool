@@ -1252,7 +1252,12 @@
   function saveCover(relPath, dataUrl) {
     if (!relPath || !dataUrl || coverSaving[relPath]) return;
     coverSaving[relPath] = true;
-    postJSON('/api/covers', { path: relPath, data: dataUrl }).catch(function () {
+    postJSON('/api/covers', {
+      path: relPath,
+      data: dataUrl,
+      platform: state.galleryPlatform,
+      name: state.galleryName
+    }).catch(function () {
       coverSaving[relPath] = false;   /* 失败允许以后重试 */
     });
   }

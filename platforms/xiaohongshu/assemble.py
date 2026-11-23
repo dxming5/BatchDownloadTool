@@ -14,7 +14,7 @@ import os
 import re
 
 from conf import settings
-from core import downloader, naming
+from core import downloader, store
 from core.utils import safe_name
 from platforms.xiaohongshu import scraper
 
@@ -239,15 +239,16 @@ def collect(result):
     return entries, {}, dropped
 
 
-def run(result, store, on_progress=None, should_stop=None,
+def run(result, on_progress=None, should_stop=None,
         media_label=ID_RECORD_LABEL):
     """
     并发下载小红书笔记，进度按实际媒体地址数统计
 
     一次任务只有一个博主：collect 已滤掉作者不一致的笔记。
-    先由主线程挑出要下载的笔记并算好落盘路径（建目录只在这一步做），
-    再交给线程池并发拉取，HEIC 转 JPG 也在下载线程里做；
-    每个文件完成即计 1 个进度，记 ID 由下载层按篇聚合。
+    博主名与已记录的 ID 从 store 取（编排层已 activate）；落盘路径也由
+    下载层向 store 要，本模块不碰任何路径。
+    先由主线程挑出要下载的笔记，再交给线程池并发拉取，HEIC 转 JPG 也在
+    下载线程里做；每个文件完成即计 1 个进度，记 ID 由下载层按篇聚合。
     图片地址不带后缀，走 .part 探测扩展名。
     """
     entries, unknown, dropped = collect(result)
@@ -296,17 +297,15 @@ def run(result, store, on_progress=None, should_stop=None,
         return {'done': 0, 'total': 0, 'stopped': False,
                 'failures': [], 'unknown_types': unknown}
 
-    author = entries[0]['author']
-    blogger_dir = store.ensure(author)
-    if not blogger_dir:
-        notice('博主名不可用：{}'.format(author))
+    if not store.name():
+        notice('博主名不可用')
         return {'done': 0, 'total': 0, 'stopped': False,
                 'failures': [], 'unknown_types': unknown}
-    done_ids = store.read_ids(author)
+    done_ids = store.read_ids()
 
     video_total = sum(1 for entry in entries if entry['kind'] == 'video')
     image_total = sum(1 for entry in entries if entry['kind'] == 'image')
-    notify({'stage': 'start', 'blogger': author,
+    notify({'stage': 'start', 'blogger': store.name(),
             'video_total': video_total, 'picture_total': image_total})
 
     jobs = []           # (条目 ID, 发布时间, [地址])，交给统一下载层
@@ -319,7 +318,7 @@ def run(result, store, on_progress=None, should_stop=None,
             break
 
         item_id = entry['id']
-        create_time = naming.format_create_time(entry['create_time'])
+        create_time = downloader.format_create_time(entry['create_time'])
 
         # 没有发布时间就无法命名，跳过且不记录
         if not create_time:
@@ -350,17 +349,14 @@ def run(result, store, on_progress=None, should_stop=None,
 
     entry_by_id = {entry['id']: entry for entry in entries}
 
-    def record_ids(batch):
-        store.append_ids(author, batch)
-
     def article_done(item_id, ok, create_time, file_name):
         report(entry_by_id[item_id], ok, create_time=create_time,
                file_name=file_name)
 
     for item_id, url, target, ok, final_path, error in downloader.fetch_all(
-            jobs, blogger_dir, request_headers, workers, cancelled,
+            jobs, request_headers, workers, cancelled,
             finish=post_process, log=notice, done_ids=done_ids, on_done=progress,
-            record_ids=record_ids, on_article_done=article_done):
+            record_ids=store.id_recorder(), on_article_done=article_done):
         # 取消后不再处理结果：已成功篇的 ID 由下载层 finally 兜底写出
         if cancelled():
             state['stopped'] = True

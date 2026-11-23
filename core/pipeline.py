@@ -8,8 +8,7 @@
 
 import time
 
-from core import registry
-from core.store import BloggerStore, download_root
+from core import registry, store
 from core.utils import safe_name
 
 
@@ -55,25 +54,30 @@ def run(url, month_days, task):
     folder_name = safe_name(result.get('nickname') or '') or target
     task.set_name(folder_name)
 
-    store = BloggerStore(download_root(), platform.key)
-    existed = store.exists(folder_name)
-    if not store.ensure(folder_name):
+    existed = store.blogger(platform.key, folder_name) is not None
+    blogger = store.ensure(platform.key, folder_name)
+    if not blogger:
         task.mark('error', '博主目录不可用：{}'.format(folder_name))
         return
     # 登记主页链接，之后点「更新」就不用再粘贴
-    store.save_homepage(folder_name, result.get('user_url') or '')
+    blogger.save_homepage(result.get('user_url') or '')
 
     # ---------------- 下载组装 ----------------
     task.set_phase('download')
-    stats = platform.assemble(result, store,
-                              on_progress=task.push,
-                              should_stop=task.stop_flag.is_set,
-                              media_label=platform.media_label) or {}
+    # 登记本次任务目标：下载层只向 store 要路径，不再接收博主对象
+    store.activate(blogger)
+    try:
+        stats = platform.assemble(result,
+                                  on_progress=task.push,
+                                  should_stop=task.stop_flag.is_set,
+                                  media_label=platform.media_label) or {}
+    finally:
+        store.clear()
 
     # 平台一条都没挑出来：撤掉可能刚建的空目录
     if not stats.get('total'):
         if not existed:
-            store.delete(folder_name)
+            blogger.delete()
         task.mark('error', '没有可下载内容：可能未登录、没有公开作品、已全部下载过，'
                            '或超出所选时间范围')
         return
@@ -84,11 +88,11 @@ def run(url, month_days, task):
         task.mark('done')
 
 
-def mark_downloaded(platform, store, users):
+def mark_downloaded(platform, users):
     """给关注列表每项标注是否已有下载目录（只读 homepage.txt，不建目录）"""
     existing = set()
-    for name in store.list_bloggers():
-        homepage = store.read_homepage(name)
+    for blogger in store.platform_bloggers(platform.key):
+        homepage = blogger.read_homepage()
         uid = platform.user_id_of(homepage) if homepage else ''
         if uid:
             existing.add(uid)
@@ -133,6 +137,5 @@ def run_following(platform_key, task):
                            '或当前账号没有关注任何人')
         return
 
-    store = BloggerStore(download_root(), platform.key)
-    task.set_following(mark_downloaded(platform, store, users))
+    task.set_following(mark_downloaded(platform, users))
     task.mark('done', '关注列表抓取完成，共 {} 位'.format(len(users)))

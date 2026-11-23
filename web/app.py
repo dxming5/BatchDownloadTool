@@ -22,13 +22,11 @@ from markupsafe import escape
 
 import platforms  # noqa: F401  导入即注册平台
 from conf import settings
-from core import registry
+from core import paths, registry, store
 from core.pipeline import run as run_pipeline, run_following
-from core.store import BloggerStore, download_root
 from core.task import Task
-from core.utils import make_dir, rm_dir
-from web.media_api import MEDIA_EXTS, VIDEO_EXTS, media_response, resolve_media
-from web.media_cache import cover_path
+from core.utils import make_dir
+from web.media_api import MEDIA_EXTS, VIDEO_EXTS, cover_path, media_response
 
 _TASKS = collections.OrderedDict()   # task_id -> Task，保持插入顺序便于淘汰
 _TASKS_LIMIT = 20
@@ -112,13 +110,6 @@ def _start_platform_task(platform_key, mode='following'):
     return task, ''
 
 
-def _store_for(platform_key):
-    """取某个平台的存储对象；平台未注册返回 None"""
-    if not registry.get(platform_key):
-        return None
-    return BloggerStore(download_root(), platform_key)
-
-
 def _static_stamp(static_folder):
     """静态资源的内容指纹，作为前端资源版本号（内容一变版本号必变）"""
     digest = hashlib.md5()
@@ -173,7 +164,7 @@ def create_app():
             request.path == '/api/media'
             and response.status_code == 200
             and request.args.get('v')
-            and (request.args.get('thumb') or '/.cache/covers/' in rel)
+            and (request.args.get('thumb') or paths.is_cover(rel))
         )
         if versioned:
             response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -189,10 +180,9 @@ def create_app():
 
     @app.get('/api/status')
     def api_status():
-        root = download_root()
         count = 0
         for platform in registry.all_platforms():
-            count += len(BloggerStore(root, platform.key).list_bloggers(VIDEO_EXTS))
+            count += len(store.platform_bloggers(platform.key, VIDEO_EXTS))
         with _LOCK:
             active = _ACTIVE.snapshot() if _ACTIVE and _ACTIVE.is_running() else None
         return jsonify({
@@ -283,16 +273,14 @@ def create_app():
     @app.get('/api/bloggers')
     def api_bloggers():
         """按平台分组返回博主列表"""
-        root = download_root()
         groups = []
         total = 0
         for platform in registry.all_platforms():
-            store = BloggerStore(root, platform.key)
-            names = store.list_bloggers(VIDEO_EXTS)
-            if not names:
+            bloggers = store.platform_bloggers(platform.key, VIDEO_EXTS)
+            if not bloggers:
                 continue
-            items = [dict(store.blogger_item(name), platform=platform.key)
-                     for name in names]
+            items = [dict(blogger.item(), platform=platform.key)
+                     for blogger in bloggers]
             total += len(items)
             groups.append({'platform': platform.key,
                            'label': platform.label,
@@ -302,8 +290,8 @@ def create_app():
     @app.post('/api/bloggers/<platform_key>/<name>/update')
     def api_blogger_update(platform_key, name):
         """用目录里登记的主页链接重新抓取；靠作品 ID 去重，只补新增"""
-        store = _store_for(platform_key)
-        if not store or not store.exists(name):
+        blogger = store.blogger(platform_key, name)
+        if not blogger:
             return jsonify({'error': '博主不存在'}), 404
         if not _scraper_ready():
             return jsonify({
@@ -311,7 +299,7 @@ def create_app():
                          '与 playwright install chromium 后重启服务'
             }), 503
 
-        home = store.read_homepage(name)
+        home = blogger.read_homepage()
         if not home:
             return jsonify({
                 'error': '该博主目录缺少 homepage.txt，请重新粘贴主页链接抓取一次以登记'
@@ -325,54 +313,48 @@ def create_app():
 
     @app.delete('/api/bloggers/<platform_key>/<name>')
     def api_blogger_delete(platform_key, name):
-        store = _store_for(platform_key)
-        if not store or not store.exists(name):
+        blogger = store.blogger(platform_key, name)
+        if not blogger:
             return jsonify({'error': '博主不存在'}), 404
         with _LOCK:
             if _ACTIVE is not None and _ACTIVE.is_running():
                 return jsonify({'error': '下载任务进行中，暂不能删除'}), 409
-        target = store.blogger_dir(name)
-        rm_dir(target)
+        blogger.delete()
         return jsonify({'deleted': name})
 
     @app.get('/api/bloggers/<platform_key>/<name>/files')
     def api_blogger_files(platform_key, name):
-        store = _store_for(platform_key)
-        base = store.blogger_dir(name) if store else None
+        blogger = store.blogger(platform_key, name)
         items = []
-        if base:
-            root = download_root()
-            for current, dirs, files in os.walk(base):
-                # 跳过隐藏目录：.cache 里的缩略图不能出现在博主的图片列表里
-                dirs[:] = [entry for entry in dirs if not entry.startswith('.')]
-                for file_name in files:
-                    lower = file_name.lower()
-                    if not lower.endswith(MEDIA_EXTS):
-                        continue
-                    full = os.path.join(current, file_name)
-                    try:
-                        info = os.stat(full)
-                    except OSError:
-                        continue
-                    mtime = int(info.st_mtime)
-                    rel = os.path.relpath(full, root).replace('\\', '/')
-                    kind = 'video' if lower.endswith(VIDEO_EXTS) else 'image'
-                    item = {
-                        'name': file_name,
-                        'kind': kind,
-                        'size': info.st_size,
-                        'mtime': mtime,
-                        'rel': rel,
-                        'url': '/api/media?path=' + quote(rel),
-                        'thumb': '/api/media?thumb=320&path=' + quote(rel),
-                    }
-                    # 视频封面由前端取帧后回存，存在就直接返回
-                    if kind == 'video':
-                        cover = cover_path(root, full, mtime)
-                        if os.path.isfile(cover):
-                            item['cover'] = '/api/media?path=' + quote(
-                                os.path.relpath(cover, root).replace('\\', '/'))
-                    items.append(item)
+        if blogger:
+            ident = '&platform={}&name={}'.format(quote(platform_key), quote(name))
+            # 遍历规则（跳过缓存等隐藏目录）由 store 给出，路由层不复制布局
+            for full in paths.media_files(blogger.key, blogger.name, MEDIA_EXTS):
+                try:
+                    info = os.stat(full)
+                except OSError:
+                    continue
+                file_name = os.path.basename(full)
+                lower = file_name.lower()
+                mtime = int(info.st_mtime)
+                rel = paths.relative(full)
+                kind = 'video' if lower.endswith(VIDEO_EXTS) else 'image'
+                item = {
+                    'name': file_name,
+                    'kind': kind,
+                    'size': info.st_size,
+                    'mtime': mtime,
+                    'rel': rel,
+                    'url': '/api/media?path=' + quote(rel) + ident,
+                    'thumb': '/api/media?thumb=320&path=' + quote(rel) + ident,
+                }
+                # 视频封面由前端取帧后回存，存在就直接返回
+                if kind == 'video':
+                    cover = cover_path(blogger, full, mtime)
+                    if os.path.isfile(cover):
+                        item['cover'] = '/api/media?path=' + quote(
+                            paths.relative(cover))
+                items.append(item)
         # 仅影响预览展示：按文件名降序
         items.sort(key=lambda item: item['name'], reverse=True)
         return jsonify({'platform': platform_key, 'name': name,
@@ -380,11 +362,14 @@ def create_app():
 
     @app.post('/api/covers')
     def api_cover_save():
-        """前端把取到的视频首帧回存到 .cache/covers，下次直接复用"""
+        """前端把取到的视频首帧回存到封面缓存目录，下次直接复用"""
         payload = request.get_json(silent=True) or {}
-        root = download_root()
-        target = resolve_media(root, payload.get('path', ''))
-        if not target or not target.lower().endswith(VIDEO_EXTS):
+        blogger = store.blogger((payload.get('platform') or '').strip(),
+                                (payload.get('name') or '').strip())
+        target = paths.resolve(payload.get('path', ''))
+        if not blogger or not target or not target.lower().endswith(VIDEO_EXTS):
+            return jsonify({'error': '无效的视频路径'}), 400
+        if not paths.is_inside(blogger.key, blogger.name, target):
             return jsonify({'error': '无效的视频路径'}), 400
 
         data = (payload.get('data') or '').strip()
@@ -397,7 +382,7 @@ def create_app():
         if not raw or len(raw) > 512 * 1024:
             return jsonify({'error': '封面数据大小异常'}), 413
 
-        output = cover_path(root, target)
+        output = cover_path(blogger, target)
         make_dir(os.path.dirname(output))
         try:
             with open(output, 'wb') as handle:
@@ -405,14 +390,14 @@ def create_app():
         except OSError as error:
             return jsonify({'error': '封面写入失败：{}'.format(error)}), 500
 
-        rel = os.path.relpath(output, os.path.realpath(root)).replace('\\', '/')
-        return jsonify({'cover': '/api/media?path=' + quote(rel)})
+        return jsonify({'cover': '/api/media?path=' + quote(paths.relative(output))})
 
     # ---------------- 媒体回放 ----------------
 
     @app.get('/api/media')
     def api_media():
-        return media_response(download_root(),
+        return media_response(request.args.get('platform', ''),
+                              request.args.get('name', ''),
                               request.args.get('path', ''),
                               request.args.get('thumb'))
 

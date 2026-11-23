@@ -2,11 +2,12 @@
 """
 下载执行
 
-统一下载层：按篇接收地址、校验去重、命名落盘、并发调度、进度统计都在这里，
+统一下载层：按篇接收地址、校验去重、拼文件名落盘、并发调度、进度统计都在这里，
 平台只负责挑条目、算发布时间、把 (篇 ID, 时间, [地址]) 交给 fetch_all。
 
     fetch_media：把一个地址拉成本地文件——失败重试，失败时清掉半成品，
-       先落 .part，下载完成后按响应头/文件头/URL 后缀定扩展名与落盘目录；
+       先落临时文件，完成后按响应头/文件头/URL 后缀定扩展名，落盘路径向
+       调用方给的路径来源要（本层不拼任何目录）；
     fetch_all：按篇校验 done_ids（整篇跳过并计入进度），展开地址并发拉取，
        结果按完成顺序回传，落盘后处理（如 HEIC 转 JPG）在下载线程里执行，
        并按篇聚合记 ID（一篇全成功才记，满一批落盘一次）。
@@ -19,18 +20,19 @@ import random
 import time
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from urllib import request
 from urllib.parse import urlparse
 
 from conf import settings
-from core.store import PICTURE_DIR_NAME
+from core import store
 
 # ---------------- 扩展名 ----------------
 
-# 图片后缀：落盘进 picture/，同时作为媒体列表的白名单来源
+# 图片后缀：落盘进 store 的图片目录，同时作为媒体列表的白名单来源
 IMAGE_EXTS = ('jpg', 'png', 'webp', 'gif', 'avif', 'heic', 'heif',
               'bmp', 'tif', 'ico')
-# 视频后缀：落盘在博主目录根
+# 视频后缀：落盘在路径来源给出的根目录
 VIDEO_EXTS = ('mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'flv', 'wmv',
               'ts', '3gp', 'mpg')
 
@@ -69,7 +71,17 @@ EXT_BY_TYPE = {
     'video/mpeg': 'mpg',
 }
 
-PART_EXT = 'part'
+def format_create_time(timestamp):
+    """
+    把秒级时间戳转成文件名前缀（图片 / 视频文件名的一部分）
+
+    Returns:
+        str|None: 形如 2026-01-01 10.00.00；缺失或非法时返回 None
+    """
+    try:
+        return datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d %H.%M.%S')
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def detect_media_ext(path):
@@ -153,25 +165,18 @@ def _cleanup(path):
             pass
 
 
-def final_target(blogger_dir, create_time, index, ext):
-    """按扩展名决定最终落盘路径：视频在根目录，图片在 picture/"""
-    if ext in VIDEO_EXTS:
-        return os.path.join(blogger_dir, '{}.{}'.format(create_time, ext))
-    suffix = '{} - {}.{}'.format(create_time, index + 1, ext)
-    return os.path.join(blogger_dir, PICTURE_DIR_NAME, suffix)
-
-
-def fetch_media(url, target, headers, blogger_dir, create_time, index=0, log=None):
+def fetch_media(url, create_time, index, headers, log=None):
     """
-    下载单个地址：先落 .part，完成后按响应头/文件头/URL 后缀定扩展名，
-    再按扩展名决定落盘目录（视频在根目录、图片在 picture/）。
+    下载单个地址：先落 .part，完成后按响应头/文件头/URL 后缀定扩展名。
 
-    target 是 .part 临时路径（放根目录）；blogger_dir/create_time/index 用于算最终路径。
+    放哪由 store 决定（当前任务目标现算路径，含视频/图片分目录）；本层只判断
+    「这是视频还是图片」，不拼任何目录，也不接收任何路径参数。
     log 可选，拿到响应头后打印「正在下载」日志，尽量显示最终文件名。
 
     Returns:
         tuple: (是否成功, 最终路径, 错误信息)
     """
+    target = store.part_path(create_time, index)
     content_type = ''
     logged = False
     for attempt in range(settings.MAX_RETRY + 1):
@@ -183,7 +188,8 @@ def fetch_media(url, target, headers, blogger_dir, create_time, index=0, log=Non
                 if log and not logged:
                     logged = True
                     ext = ext_from_content_type(content_type) or ext_from_url(url)
-                    display = (final_target(blogger_dir, create_time, index, ext)
+                    display = (store.media_path(create_time, index, ext,
+                                                  ext in VIDEO_EXTS)
                                if ext else target)
                     try:
                         log('正在下载 {}'.format(os.path.basename(display)))
@@ -194,7 +200,7 @@ def fetch_media(url, target, headers, blogger_dir, create_time, index=0, log=Non
                    or detect_media_ext(target)
                    or ext_from_url(url)
                    or FALLBACK_EXT)
-            final = final_target(blogger_dir, create_time, index, ext)
+            final = store.media_path(create_time, index, ext, ext in VIDEO_EXTS)
             try:
                 parent = os.path.dirname(final)
                 if parent and not os.path.isdir(parent):
@@ -217,42 +223,38 @@ def fetch_media(url, target, headers, blogger_dir, create_time, index=0, log=Non
 CANCELLED_ERROR = '已取消'
 
 
-def _fetch_one(key, url, target, headers, should_stop, finish, log=None,
-               blogger_dir=None, create_time=None, index=0):
+def _fetch_one(item_id, url, create_time, index, headers,
+               should_stop, finish, log=None):
     """线程池里的单个任务：已取消就不再发起请求，成功后执行落盘后处理"""
+    target = store.part_path(create_time, index)
     if should_stop and should_stop():
-        return key, url, target, False, target, CANCELLED_ERROR
+        return item_id, url, target, False, target, CANCELLED_ERROR
 
-    ok, final, error = fetch_media(url, target, headers, blogger_dir,
-                                   create_time, index, log)
+    ok, final, error = fetch_media(url, create_time, index, headers, log)
     if not ok:
-        return key, url, target, False, final, error
+        return item_id, url, target, False, final, error
 
     if finish:
         try:
             final = finish(final) or final
         except Exception as exc:
             # 后处理失败不算下载失败：文件已落盘，只把原因带回去提示
-            return key, url, target, True, final, '落盘后处理失败：{}'.format(exc)
-    return key, url, target, True, final, ''
+            return item_id, url, target, True, final, '落盘后处理失败：{}'.format(exc)
+    return item_id, url, target, True, final, ''
 
 
-def _temp_target(blogger_dir, create_time, index):
-    """下载中的临时路径：统一放博主根目录，扩展名待定"""
-    return os.path.join(blogger_dir,
-                        '{} - {}.{}'.format(create_time, index + 1, PART_EXT))
-
-
-def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
+def fetch_all(jobs, headers=None, workers=1, should_stop=None,
               finish=None, log=None, done_ids=None, on_done=None,
               record_ids=None, on_article_done=None, flush_batch=20):
     """
     按篇接收地址，统一校验去重、命名落盘、并发下载，边完成边回传
 
+    落盘路径由 store 的当前任务目标现算（编排层已 activate），本函数不接收
+    博主对象，也不接收任何目录或路径参数。
+
     Args:
         jobs:        [(id, time, [url, ...])]，一篇一项；id 为篇 ID，time 为
                      已格式化的发布时间（命名前缀），[url] 为该篇全部媒体地址
-        blogger_dir: 博主目录（最终落盘的根）
         headers:     请求头
         workers:     并发数；<=1 或只有一个地址时逐个下载
         should_stop: 取消回调；命中时排队中的任务直接失败返回，不再发请求
@@ -281,7 +283,7 @@ def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
 
     # 展开：(id, time, [url]) → 每个地址一个任务；已下载的篇直接排除，不计入进度
     # 同时按发布时间做撞名提示：同一时间前缀被不同篇占用时会被覆盖
-    tasks = []          # (id, url, temp_target, index, create_time)
+    tasks = []          # (id, url, create_time, index)
     written = {}        # 时间前缀 -> 篇 ID
     for item_id, create_time, urls in jobs:
         if item_id in done_ids:
@@ -295,8 +297,7 @@ def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
                 pass
         written[create_time] = item_id
         for index, url in enumerate(urls):
-            tasks.append((item_id, url, _temp_target(blogger_dir, create_time, index),
-                          index, create_time))
+            tasks.append((item_id, url, create_time, index))
 
     total = len(tasks)
     done = 0
@@ -308,7 +309,7 @@ def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
     create_time_of = {}  # 篇 ID -> 发布时间（命名前缀）
     new_ids = []         # 待落盘的 ID 缓冲
 
-    for item_id, _url, _target, _index, create_time in tasks:
+    for item_id, _url, create_time, _index in tasks:
         remaining[item_id] = remaining.get(item_id, 0) + 1
         article_ok.setdefault(item_id, True)
         create_time_of.setdefault(item_id, create_time)
@@ -366,9 +367,9 @@ def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
         workers = 1
 
     def run(task):
-        item_id, url, target, index, create_time = task
-        return _fetch_one(item_id, url, target, headers, should_stop, finish,
-                          log, blogger_dir, create_time, index)
+        item_id, url, create_time, index = task
+        return _fetch_one(item_id, url, create_time, index, headers,
+                          should_stop, finish, log)
 
     if workers == 1 or len(tasks) == 1:
         try:
@@ -387,11 +388,16 @@ def fetch_all(jobs, blogger_dir, headers=None, workers=1, should_stop=None,
             try:
                 for future in as_completed(futures):
                     task = futures[future]
-                    item_id, url, target, index, create_time = task
+                    item_id, url, create_time, index = task
                     try:
                         result = future.result()
                     except Exception as exc:
-                        result = item_id, url, target, False, target, '下载线程异常：{}'.format(exc)
+                        try:
+                            target = store.part_path(create_time, index)
+                        except Exception:
+                            target = ''
+                        result = (item_id, url, target, False, target,
+                                  '下载线程异常：{}'.format(exc))
                     settle()
                     aggregate(result)
                     yield result

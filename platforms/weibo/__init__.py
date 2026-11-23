@@ -42,10 +42,10 @@ class WeiboPlatform(Platform):
 
     # ---------------- 下载组装 ----------------
 
-    def assemble(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, on_progress=None, should_stop=None,
                  media_label=''):
         return assemble.run(
-            result, store,
+            result,
             on_progress=on_progress,
             should_stop=should_stop,
             media_label=media_label or self.media_label,

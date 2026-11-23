@@ -47,13 +47,14 @@ class Platform(object):
     def scrape(self, target, options, on_progress=None, should_stop=None):
         raise NotImplementedError
 
-    def assemble(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, on_progress=None, should_stop=None,
                  media_label=''):
         """这批内容怎么下：挑哪些、地址怎么取由平台决定
 
-        把条目整理成 (篇 ID, 发布时间, [地址]) 交给 downloader.fetch_all，
-        由下载层统一校验去重、命名落盘、并发下载与按地址计进度；
-        平台只按篇聚合结果，一篇全部成功才把 ID 写入 aweme_id.txt。
+        博主名与已记录的 ID 由 store 提供（编排层已 activate）；把条目整理成
+        (篇 ID, 发布时间, [地址]) 交给 downloader.fetch_all，由下载层统一校验
+        去重、拼文件名落盘、并发下载与按地址计进度。平台既不接收博主对象，
+        也不接收目录或路径参数，落盘路径由下载层向 store 要。
         """
         raise NotImplementedError
 

@@ -120,6 +120,10 @@ class Task(object):
                     self.logs.append('跳过未知 aweme_type：{}'.format(
                         ', '.join('{}={}'.format(key, value)
                                   for key, value in self.unknown_types.items())))
+                # 下载结束的收尾提示：取消时不打印，避免与「已取消」混淆
+                if not event.get('stopped'):
+                    self.logs.append('下载 {} {} 完成'.format(
+                        self.platform_label or self.platform_key, self.blogger))
 
     def mark(self, status, message=''):
         with self._lock:

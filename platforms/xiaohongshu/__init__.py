@@ -2,7 +2,7 @@
 """小红书平台实现：抓取 + 下载组装"""
 
 from conf import settings
-from core.store import BloggerStore, download_root
+from core import store
 from platforms.base import Platform
 from platforms.xiaohongshu import assemble, scraper
 
@@ -39,34 +39,33 @@ class XiaohongshuPlatform(Platform):
 
     def scrape(self, target, options, on_progress=None, should_stop=None):
         # 已经下载过的笔记不再打开详情页：这里只有小红书自己关心这件事
-        store = BloggerStore(download_root(), self.key)
         return scraper.fetch_user_notes(
             target,
             options=options,
             since_ts=options.get('since_ts'),
             on_progress=on_progress,
             should_stop=should_stop,
-            known_ids=self.known_ids(target, store),
+            known_ids=self.known_ids(target),
             verbose=False,
         )
 
-    def known_ids(self, target, store):
+    def known_ids(self, target):
         """按主页链接反查已有目录，取出已下载的笔记 ID；找不到返回空集"""
         wanted = _user_id_of(target)
         if not wanted:
             return set()
-        for name in store.list_bloggers():
-            homepage = store.read_homepage(name)
+        for blogger in store.platform_bloggers(self.key):
+            homepage = blogger.read_homepage()
             if homepage and _user_id_of(homepage) == wanted:
-                return store.read_ids(name)
+                return blogger.read_ids()
         return set()
 
     # ---------------- 下载组装 ----------------
 
-    def assemble(self, result, store, on_progress=None, should_stop=None,
+    def assemble(self, result, on_progress=None, should_stop=None,
                  media_label=''):
         return assemble.run(
-            result, store,
+            result,
             on_progress=on_progress,
             should_stop=should_stop,
             media_label=media_label or self.media_label,
