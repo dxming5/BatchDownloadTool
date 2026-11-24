@@ -10,7 +10,9 @@
        调用方给的路径来源要（本层不拼任何目录）；
     fetch_all：按篇校验 done_ids（整篇跳过并计入进度），展开地址并发拉取，
        结果按完成顺序回传，落盘后处理（如 HEIC 转 JPG）在下载线程里执行，
-       并按篇聚合记 ID（一篇全成功才记，满一批落盘一次）。
+       并按篇聚合记 ID（一篇全成功才记，满一批落盘一次）；
+    fetch_article：单篇入口，把统一 article 映射成一个 job 复用 fetch_all，
+       一次回传该篇的成败、文件数、失败清单与提示，供流式会话逐篇调用。
 
 ID 记录由这里按篇聚合后统一写入；每个地址开始下载时的日志也由这里统一输出。
 """
@@ -406,3 +408,70 @@ def fetch_all(jobs, headers=None, workers=1, should_stop=None,
                     future.cancel()
         finally:
             flush_ids()
+
+
+def fetch_article(article, headers=None, workers=1, should_stop=None,
+                  finish=None, log=None, record_ids=None):
+    """
+    下载单篇：把统一 article 映射成一个 job 复用 fetch_all
+
+    article 约定为 {'id', 'create_time', 'urls', 'kind'}，create_time 是已
+    格式化的命名前缀（由会话用 format_create_time 生成）。不接收进度回调，
+    结果一次性回传，供流式会话逐篇记账。
+
+    Returns:
+        dict: {'ok', 'cancelled', 'files', 'failures', 'notices', 'file'}
+            ok        该篇全部媒体成功
+            cancelled 排队任务是否命中取消
+            files     成功落盘的文件数
+            failures  [{'url', 'file', 'error'}]，失败的地址
+            notices   下载与后处理提示，调用方可原样上报
+            file      最后成功落盘的文件名
+    """
+    article = article or {}
+    article_id = article.get('id') or ''
+    create_time = article.get('create_time') or ''
+    urls = [url for url in (article.get('urls') or []) if url]
+
+    files = 0
+    cancelled = False
+    last_file = ''
+    notices = []
+    failures = []
+
+    def say(message):
+        if not message:
+            return
+        notices.append(message)
+        if log:
+            try:
+                log(message)
+            except Exception:
+                pass
+
+    for _item_id, url, target, ok, final_path, error in fetch_all(
+            [(article_id, create_time, urls)],
+            headers, workers, should_stop,
+            finish=finish, log=say, record_ids=record_ids):
+        if error == CANCELLED_ERROR:
+            cancelled = True
+            break
+        if ok:
+            files += 1
+            if final_path:
+                last_file = os.path.basename(final_path)
+            if error:
+                # 落盘后处理失败（如 HEIC 转 JPG）只提示，不算下载失败
+                say(error)
+        else:
+            failures.append({'url': url, 'file': os.path.basename(target or ''),
+                             'error': error})
+
+    return {
+        'ok': bool(urls) and not failures and not cancelled,
+        'cancelled': cancelled,
+        'files': files,
+        'failures': failures,
+        'notices': notices,
+        'file': last_file,
+    }

@@ -201,8 +201,32 @@ def wait_for_login(page, seconds, cookie_names_required, modal_selector='',
         if waited % 20000 == 0:
             say('已等待 {}/{} 秒（当前窗口 Cookie {} 个，{} 仍未出现）…'.format(
                 waited // 1000, seconds, cookie_count(page), required_label))
-    say('等待超时，按未登录状态继续')
+    say('等待超时，未登录，已中止')
     return False
+
+
+def ensure_logged_in(page, cookie_names, modal_selector, wait_seconds,
+                     should_stop=None, on_progress=None, verbose=True,
+                     required_label=''):
+    """
+    登录闸门：只判断登录态，已登录直接通过，未登录等待人工登录
+
+    不取任何页面数据，也不刷新页面；刷新由调用方在返回 True 后执行。
+    False 表示等待超时、被取消或页面不可用，调用方必须中止任务。
+
+    Returns:
+        bool: 是否已登录
+    """
+    try:
+        logged, _modal = login_state(page, cookie_names, modal_selector)
+    except Exception:
+        logged = False
+    if logged:
+        return True
+    return bool(wait_for_login(page, wait_seconds, cookie_names, modal_selector,
+                               should_stop=should_stop, on_progress=on_progress,
+                               verbose=verbose,
+                               required_label=required_label or 'sessionid'))
 
 
 def response_json(response):

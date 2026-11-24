@@ -16,7 +16,9 @@
 同样会出现 SUB/SUBP，单看 Cookie 名会把访客判成已登录，于是拿匿名态去取数，
 只能看到首页的一小部分内容（表现为「下载不全」）。Cookie 只在接口不可用时兜底。
 
-链接取 uid、昵称与时间解析也在这里；图片/视频取址与下载组装在 assemble.py。
+登录闸门之后强制刷新用户页，再从页面级数据取昵称（不遍历条目作者），先上报
+on_meta，然后逐页逐条通过 on_article 交出微博，不再累积全量 mblogs。
+链接取 uid、昵称与时间解析也在这里；图片/视频取址与归一化在 assemble.py。
 """
 
 import datetime
@@ -129,6 +131,56 @@ def parse_uid(raw):
 def home_url(uid):
     """规范化主页地址；写进 homepage.txt，「更新」时能被再次识别"""
     return 'https://m.weibo.cn/u/{}'.format(uid)
+
+
+# 页面级昵称：先读全局配置，再读昵称节点；绝不从条目作者里取身份
+PAGE_NICKNAME_JS = """
+() => {
+    const clean = (v) => String(v == null ? '' : v).trim();
+    const configs = [window.$CONFIG, window.__INITIAL_STATE__, window.pageConfig];
+    for (const cfg of configs) {
+        if (!cfg || typeof cfg !== 'object') continue;
+        const user = cfg.user || cfg.userInfo || {};
+        const values = [cfg.nickname, cfg.nick, cfg.screen_name,
+                        user.screen_name, user.name, user.nickname];
+        for (const value of values) {
+            const text = clean(value);
+            if (text) return text;
+        }
+    }
+    const selectors = ['.m-login .name', '.user-info .name', '.card-name',
+                       '.profile .name', '[class*="nickname"]'];
+    for (const selector of selectors) {
+        const node = document.querySelector(selector);
+        if (!node) continue;
+        const text = clean(node.textContent || node.innerText);
+        if (text) return text;
+    }
+    return '';
+}
+"""
+
+
+def page_nickname(page):
+    """
+    从页面自身取昵称：全局配置 / 昵称 DOM → 标题按「的微博」截断 → 标题原文
+
+    只用于身份冻结，不读任何条目数据；取不到时返回空串，由会话判为身份缺失。
+    """
+    value = ''
+    try:
+        value = page.evaluate(PAGE_NICKNAME_JS)
+    except Exception:
+        value = ''
+    value = str(value).strip() if value else ''
+    if not value:
+        try:
+            value = (page.title() or '').strip()
+        except Exception:
+            value = ''
+        if '的微博' in value:
+            value = value.split('的微博')[0].strip()
+    return safe_name(value)
 
 
 def posts_container(uid):
@@ -380,22 +432,29 @@ def ensure_login(page, profile_dir, options, on_progress=None,
 
 
 def fetch_user_posts(target, options=None, since_ts=None,
+                     on_meta=None, on_article=None,
                      on_progress=None, should_stop=None, verbose=False):
     """
-    抓取某博主的微博列表（只收集带图片的原始 mblog 数据）
+    抓取某博主的微博列表（流式逐条交出，不累积全量）
+
+    登录前只打开页面做登录检测，不发任何内容接口请求、不注册响应捕获；
+    登录成功后强制刷新用户页，再从页面取身份并先上报 on_meta，随后逐页
+    逐条通过 on_article 交出微博。
 
     Args:
         target:       主页链接 / 卡片接口地址 / uid
         options:      平台参数（profile_dir / headless / wait_login / timeout_ms /
                       browser_channel / proxy / max_scroll）
         since_ts:     只保留发布时间 >= since_ts 的微博
-        on_progress:  进度回调
+        on_meta:      身份回调 (nickname, blogger_id, user_url) -> {'ok': bool, ...}
+        on_article:   条目回调 (mblog) -> bool；False 表示停止交出
+        on_progress:  状态/日志回调
         should_stop:  取消检查函数
         verbose:      是否打印到控制台
 
     Returns:
-        dict: uid / user_url / nickname / pages / mblogs / has_more /
-              restricted / cancelled / since_ts / fetch_time
+        dict: uid / user_url / nickname / pages(页数) / count / cancelled /
+              stop_reason / has_more / restricted / since_ts / fetch_time
     """
     from playwright.sync_api import sync_playwright
 
@@ -412,8 +471,6 @@ def fetch_user_posts(target, options=None, since_ts=None,
     page_limit = max(1, int(options.get('max_scroll') or DEFAULT_PAGE_LIMIT))
     stale_limit = max(1, int(options.get('stale_limit') or DEFAULT_STALE_LIMIT))
 
-    mblogs = []
-    pages = []
     seen_ids = set()
     stale_run = 0
     stopped = False
@@ -421,7 +478,10 @@ def fetch_user_posts(target, options=None, since_ts=None,
     nickname = ''
     since_id = '0'
     page_index = 0
+    count = 0
     has_more = False
+    meta_ok = True
+    stop_reason = ''
 
     def log(text):
         if verbose:
@@ -445,6 +505,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
             channel=channel, proxy=proxy)
         try:
             page = context.pages[0] if context.pages else context.new_page()
+            # 登录前只打开页面：不注册监听、不读页面状态、不发内容接口请求
             page.goto(user_url, wait_until='domcontentloaded', timeout=timeout_ms)
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
                   'message': '已打开微博主页，检查登录状态…'})
@@ -455,24 +516,44 @@ def fetch_user_posts(target, options=None, since_ts=None,
                 restricted = True
                 if cancelled():
                     stopped = True
+                    stop_reason = '用户取消'
                 else:
                     raise RuntimeError(
-                        '未登录微博：请在弹出的浏览器窗口扫码登录后重试'
-                        '（登录态保存在 {}，首次使用需把 headless 设为 false）'.format(
+                        '未登录 微博：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(
                             profile_dir))
             else:
-                # 登录后回到用户页，让 Cookie 生效并取到昵称兜底信息
+                # 登录成功后强制刷新用户页，丢弃登录前可能拿到的任何数据
+                log('已登录，刷新页面后重新获取微博')
                 try:
                     page.goto(user_url, wait_until='domcontentloaded',
                               timeout=timeout_ms)
-                except Exception:
-                    log('重新打开主页失败，继续用接口抓取')
+                except Exception as error:
+                    raise RuntimeError('登录后刷新微博主页失败：{}'.format(error))
 
-            while not stopped and page_index < page_limit:
+                # 刷新完成后才取身份并上报，必须早于任何条目派发
+                nickname = page_nickname(page)
+                if on_meta:
+                    try:
+                        meta = on_meta(nickname, uid, user_url) or {}
+                    except Exception:
+                        meta = {}
+                    if meta.get('ok') is False:
+                        meta_ok = False
+                        stop_reason = '身份信息不可用'
+                if not meta_ok:
+                    log('身份信息不可用，停止抓取，不下载任何内容')
+                else:
+                    emit({'stage': 'scrape', 'pages': 0, 'count': 0,
+                          'message': '身份已冻结（{}），开始获取微博列表…'.format(
+                              nickname or uid)})
+
+            while meta_ok and not stopped and page_index < page_limit:
                 if cancelled():
                     stopped = True
+                    stop_reason = '用户取消'
                     break
                 if stale_run >= stale_limit:
+                    stop_reason = '已到时间范围边界'
                     break
 
                 page_index += 1
@@ -480,37 +561,46 @@ def fetch_user_posts(target, options=None, since_ts=None,
                     payload = request_json(context, _api_url(uid, since_id),
                                            timeout_ms, settings.MAX_RETRY)
                 except RuntimeError as error:
-                    # 已经抓到的内容不因后面某页失败而丢弃；一页都没拿到才算失败
-                    if not mblogs:
+                    # 已经交出的内容不因后面某页失败而丢弃；一页都没拿到才算失败
+                    if not count:
                         raise
                     page_index -= 1
-                    emit({'stage': 'scrape', 'pages': page_index,
-                          'count': len(mblogs),
+                    stop_reason = '第 {} 页请求失败'.format(page_index + 1)
+                    emit({'stage': 'notice',
                           'message': '第 {} 页请求失败，保留已抓取的 {} 条：{}'.format(
-                              page_index + 1, len(mblogs), error)})
+                              page_index + 1, count, error)})
                     break
                 if payload is None:
                     # 翻到底：接口说「还没有内容」，属于正常结束，不是请求失败。
                     # 但一条都没拿到时要先排除掉登录失效，否则会把未登录当成空主页。
-                    if not mblogs and not cancelled() \
+                    if not count and not cancelled() \
                             and not current_login_state(page, timeout_ms):
                         raise RuntimeError(
                             '微博接口返回「没有内容」且登录态已失效，'
                             '请重新登录后重试（登录态保存在 {}）'.format(profile_dir))
+                    stop_reason = '没有更多内容'
                     message = '第 {} 页已无更多内容，抓取结束（累计 {} 条）'.format(
-                        page_index, len(mblogs))
+                        page_index, count)
                     log(message)
-                    emit({'stage': 'scrape', 'pages': page_index - 1,
-                          'count': len(mblogs), 'message': message})
                     page_index -= 1
                     has_more = False
                     break
-                pages.append(payload)
+
                 data = payload.get('data') or {}
                 cards = data.get('cards') or []
 
+                # 首页后复核登录态：中途掉登录时接口只给残缺结果，必须早于
+                # 该页的条目派发，否则残缺数据会被当成正常内容下载。
+                if page_index == 1 and not cancelled() \
+                        and not current_login_state(page, timeout_ms):
+                    raise RuntimeError(
+                        '微博登录态在抓取过程中失效（接口 data.login=false），'
+                        '匿名访问只能拿到部分微博，已中止以免下载残缺数据；'
+                        '请重新登录后重试（登录态保存在 {}）'.format(profile_dir))
+
                 # 仅处理卡片类型 9（微博），其余是分组、广告、推荐等
                 found = 0
+                early_stop = False
                 for card in cards:
                     if not isinstance(card, dict):
                         continue
@@ -529,51 +619,51 @@ def fetch_user_posts(target, options=None, since_ts=None,
                     if since_ts and created and created < since_ts:
                         stale_run += 1
                         if stale_run >= stale_limit:
+                            early_stop = True
                             break
                         continue
                     stale_run = 0
 
                     seen_ids.add(mblog_id)
-                    mblogs.append(mblog)
+                    count += 1
+                    # 逐条交出：返回 False 立即停止（取消 / 会话不可用）
+                    if on_article and on_article(mblog) is False:
+                        stopped = True
+                        stop_reason = '用户取消' if cancelled() else '会话已停止'
+                        break
 
                 message = '第 {} 页：本页 {} 条，累计 {} 条'.format(
-                    page_index, found, len(mblogs))
+                    page_index, found, count)
                 log(message)
                 emit({'stage': 'scrape', 'pages': page_index,
-                      'count': len(mblogs), 'message': message})
+                      'count': count, 'message': message})
 
-                # 首页后复核登录态：中途掉登录时接口只给残缺结果，
-                # 不能把它当成功继续翻页，否则就是「下载不全」
-                if page_index == 1 and not cancelled() \
-                        and not current_login_state(page, timeout_ms):
-                    raise RuntimeError(
-                        '微博登录态在抓取过程中失效（接口 data.login=false），'
-                        '匿名访问只能拿到部分微博，已中止以免下载残缺数据；'
-                        '请重新登录后重试（登录态保存在 {}）'.format(profile_dir))
+                if stopped:
+                    break
+                if early_stop:
+                    stop_reason = '已到时间范围边界'
+                    break
 
                 next_id = str(((data.get('cardlistInfo') or {}).get('since_id')) or '')
                 if not next_id or next_id == '0':
                     has_more = False
+                    stop_reason = '没有更多内容'
                     break
                 if next_id == since_id:
                     log('since_id 未变化（{}），提前结束翻页'.format(next_id))
                     has_more = False
+                    stop_reason = 'since_id 未变化'
                     break
                 has_more = True
                 since_id = next_id
 
                 if not _sleep(random.uniform(*PAGE_INTERVAL), should_stop):
                     stopped = True
+                    stop_reason = '用户取消'
                     break
-
-            if mblogs and not nickname:
-                nickname = author_of(mblogs[0])
-            if not nickname:
-                try:
-                    title = (page.title() or '').strip()
-                    nickname = title.split('的微博')[0].strip() if '的微博' in title else title
-                except Exception:
-                    nickname = ''
+            else:
+                if not stop_reason:
+                    stop_reason = '达到 max_scroll 上限'
         finally:
             try:
                 context.close()
@@ -587,19 +677,20 @@ def fetch_user_posts(target, options=None, since_ts=None,
         log(limit_message)
         emit({'stage': 'notice', 'message': limit_message})
 
-    log('抓取结束：共 {} 条（{} 页）'.format(len(mblogs), page_index))
-    emit({'stage': 'scrape_done', 'pages': page_index, 'count': len(mblogs),
-          'message': '抓取结束，共 {} 条'.format(len(mblogs))})
+    log('抓取结束：{}（共 {} 条，{} 页）'.format(stop_reason, count, page_index))
+    emit({'stage': 'scrape_done', 'pages': page_index, 'count': count,
+          'message': '抓取结束：{}，共 {} 条'.format(stop_reason, count)})
 
     return {
         'uid': uid,
         'user_url': user_url,
         'nickname': nickname,
-        'pages': pages,
-        'mblogs': mblogs,
+        'pages': page_index,
+        'count': count,
+        'cancelled': bool(cancelled()),
+        'stop_reason': stop_reason,
         'has_more': has_more,
         'restricted': restricted,
-        'cancelled': stopped,
         'since_ts': since_ts,
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
