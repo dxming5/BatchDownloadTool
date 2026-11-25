@@ -15,7 +15,7 @@ import os
 
 from flask import abort, send_file
 
-from core import location, store
+from core import paths, store
 from core.downloader import (
     IMAGE_ALIASES,
     VIDEO_ALIASES,
@@ -33,7 +33,7 @@ MEDIA_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 def _inner(blogger, target):
     """媒体文件相对博主目录的路径，作为缓存 key 的一部分（由 store 计算）"""
-    return location.inner_path(blogger.identity, target)
+    return paths.inner_path(blogger.key, blogger.name, target)
 
 
 def _mtime(target):
@@ -53,7 +53,7 @@ def cover_path(blogger, target, mtime=None):
     stamp = '{}|{}'.format(_inner(blogger, target),
                            _mtime(target) if mtime is None else mtime)
     key = hashlib.md5(stamp.encode('utf-8')).hexdigest()
-    return location.cover_file(blogger.identity, key)
+    return paths.cover_file(blogger.key, blogger.name, key)
 
 
 def thumb_path(blogger, target, size):
@@ -69,7 +69,7 @@ def thumb_path(blogger, target, size):
         mtime = 0
     stamp = '{}|{}|{}'.format(_inner(blogger, target), mtime, size)
     key = hashlib.md5(stamp.encode('utf-8')).hexdigest()
-    return location.thumb_file(blogger.identity, key)
+    return paths.thumb_file(blogger.key, blogger.name, key)
 
 
 def make_thumb(blogger, target, size):
@@ -89,7 +89,7 @@ def make_thumb(blogger, target, size):
 
 def media_response(platform_key, name, rel_path, thumb=None):
     """媒体文件响应：图片可带 thumb 参数走缩略图缓存，其余按区间返回原文件"""
-    target = location.resolve(rel_path)
+    target = paths.resolve(rel_path)
     if not target:
         abort(404)
 

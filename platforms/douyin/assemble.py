@@ -2,12 +2,12 @@
 """
 抖音作品归一化
 
-把抓取到的单条原始作品转成统一 article，交给 core.pipeline 逐篇下载。
+把抓取到的单条原始作品转成统一 article，交给 core.session 逐篇下载。
 作者过滤在此用冻结后的博主名完成：一次任务只对应一个博主目录。
 抖音的 Referer 请求头也由这里提供。
 """
 
-from core import config
+from conf import settings
 from core.utils import safe_name
 
 KEY = 'douyin'
@@ -24,8 +24,8 @@ SKIP_TYPE = 'type'            # 未知作品类型
 
 def headers():
     """下载请求头：公共头 + 平台段里的 referer / accept"""
-    values = dict(config.HEADER)
-    options = config.platform_settings(KEY)
+    values = dict(settings.HEADER)
+    options = settings.platform_settings(KEY)
     if options.get('referer'):
         values['Referer'] = options['referer']
     if options.get('accept'):
@@ -66,7 +66,7 @@ def normalize(aweme, nickname, stats=None):
 
     Args:
         aweme: 接口返回的单条作品原始 dict
-        nickname: 冻结后的博主名（来自 core.location.identity()）
+        nickname: 冻结后的博主名（来自 session.identity['nickname']）
         stats: 可选统计容器，就地累加 stats['skipped'][原因] 与
                stats['unknown_types'][类型标签]，供调用方输出跳过汇总
 
@@ -95,7 +95,7 @@ def normalize(aweme, nickname, stats=None):
     if expected and author and author != expected:
         return skip(SKIP_AUTHOR)
 
-    values = config.platform_settings(KEY)
+    values = settings.platform_settings(KEY)
     kind = classify(aweme, values.get('image_types') or (),
                     values.get('video_types') or ())
     if kind is None:

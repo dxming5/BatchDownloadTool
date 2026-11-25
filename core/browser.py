@@ -229,36 +229,6 @@ def ensure_logged_in(page, cookie_names, modal_selector, wait_seconds,
                                required_label=required_label or 'sessionid'))
 
 
-def reload_after_login(page, url, timeout_ms, on_before_reload=None):
-    """
-    登录成功后重建目标页：先挂监听，再重新进入目标页
-
-    顺序固定为「先挂后刷」的原因：刷新过程发出的接口响应同样是登录后数据，
-    先挂监听才不会漏掉首屏；用 goto 而不是 reload，是因为等待登录期间页面
-    可能已被导航到登录页，reload 只会重载登录页。
-
-    Args:
-        page:              页面对象
-        url:               目标页地址（与登录前打开的一致）
-        timeout_ms:        导航超时
-        on_before_reload:  刷新前回调，用于挂响应监听、清空登录前的采集缓冲
-
-    Raises:
-        RuntimeError: 重新加载失败（调用方按抓取失败处理）
-    """
-    if on_before_reload:
-        try:
-            on_before_reload(page)
-        except Exception:
-            pass
-    try:
-        page.goto(url, wait_until='domcontentloaded',
-                  timeout=max(5000, int(timeout_ms or 30000)))
-    except Exception as error:
-        raise RuntimeError('登录后重新加载目标页失败：{}'.format(error))
-    return True
-
-
 def response_json(response):
     """安全读取响应 JSON；body 已释放时返回 None"""
     try:

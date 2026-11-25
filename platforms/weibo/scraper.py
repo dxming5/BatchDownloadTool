@@ -26,7 +26,7 @@ import random
 import re
 import time
 
-from core import config
+from conf import settings
 from core import browser
 from core.utils import safe_name
 
@@ -161,12 +161,11 @@ PAGE_NICKNAME_JS = """
 """
 
 
-def read_nickname(page):
+def page_nickname(page):
     """
     从页面自身取昵称：全局配置 / 昵称 DOM → 标题按「的微博」截断 → 标题原文
 
-    只负责「昵称从哪读」，不构造身份；取不到时返回空串，由编排层判为
-    身份缺失并中止。
+    只用于身份冻结，不读任何条目数据；取不到时返回空串，由会话判为身份缺失。
     """
     value = ''
     try:
@@ -272,7 +271,7 @@ def request_json(context, url, timeout_ms, retries=None):
     Returns:
         dict|None: 接口 JSON；已经没有更多内容时返回 None
     """
-    attempts = max(1, int(retries if retries is not None else config.MAX_RETRY) + 1)
+    attempts = max(1, int(retries if retries is not None else settings.MAX_RETRY) + 1)
     last_error = ''
 
     for attempt in range(attempts):
@@ -447,7 +446,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
         options:      平台参数（profile_dir / headless / wait_login / timeout_ms /
                       browser_channel / proxy / max_scroll）
         since_ts:     只保留发布时间 >= since_ts 的微博
-        on_meta:      昵称回调 (nickname) -> {'ok': bool, ...}
+        on_meta:      身份回调 (nickname, blogger_id, user_url) -> {'ok': bool, ...}
         on_article:   条目回调 (mblog) -> bool；False 表示停止交出
         on_progress:  状态/日志回调
         should_stop:  取消检查函数
@@ -463,7 +462,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
     uid = parse_uid(target)
     user_url = home_url(uid)
 
-    profile_dir = options.get('profile_dir') or config.platform_profile_dir('weibo')
+    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('weibo')
     headless = bool(options.get('headless', True))
     timeout_ms = max(5000, int(options.get('timeout_ms') or 30000))
     channel = options.get('browser_channel')
@@ -523,15 +522,19 @@ def fetch_user_posts(target, options=None, since_ts=None,
                         '未登录 微博：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(
                             profile_dir))
             else:
-                # 登录成功后重建用户页，丢弃登录前可能拿到的任何数据
+                # 登录成功后强制刷新用户页，丢弃登录前可能拿到的任何数据
                 log('已登录，刷新页面后重新获取微博')
-                browser.reload_after_login(page, user_url, timeout_ms)
+                try:
+                    page.goto(user_url, wait_until='domcontentloaded',
+                              timeout=timeout_ms)
+                except Exception as error:
+                    raise RuntimeError('登录后刷新微博主页失败：{}'.format(error))
 
                 # 刷新完成后才取身份并上报，必须早于任何条目派发
-                nickname = read_nickname(page)
+                nickname = page_nickname(page)
                 if on_meta:
                     try:
-                        meta = on_meta(nickname) or {}
+                        meta = on_meta(nickname, uid, user_url) or {}
                     except Exception:
                         meta = {}
                     if meta.get('ok') is False:
@@ -556,7 +559,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
                 page_index += 1
                 try:
                     payload = request_json(context, _api_url(uid, since_id),
-                                           timeout_ms, config.MAX_RETRY)
+                                           timeout_ms, settings.MAX_RETRY)
                 except RuntimeError as error:
                     # 已经交出的内容不因后面某页失败而丢弃；一页都没拿到才算失败
                     if not count:
@@ -689,6 +692,5 @@ def fetch_user_posts(target, options=None, since_ts=None,
         'has_more': has_more,
         'restricted': restricted,
         'since_ts': since_ts,
-        'error': '',
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }

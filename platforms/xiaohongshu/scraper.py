@@ -18,7 +18,7 @@ import json
 import re
 import time
 
-from core import config
+from conf import settings
 from core import browser
 from core.utils import safe_name
 
@@ -139,7 +139,7 @@ DOM_NICKNAME_JS = """
 GENERIC_NICKNAMES = ('小红书', '小红书 - 小红书')
 
 
-def _nickname_from_page(page):
+def profile_nickname(page):
     """从页面自身取博主昵称：页面状态 → 昵称 DOM → 标题按 ' - ' 截断"""
     for script in (PROFILE_NICKNAME_JS, DOM_NICKNAME_JS):
         try:
@@ -156,7 +156,7 @@ def _nickname_from_page(page):
     return value if value and value not in GENERIC_NICKNAMES else ''
 
 
-def _nickname_from_responses(responses, blogger_id='', on_message=None):
+def profile_nickname_from_responses(responses, blogger_id='', on_message=None):
     """从登录后的用户资料响应取昵称；只认用户资料响应，不碰笔记/详情作者"""
     def emit(message):
         if on_message:
@@ -202,28 +202,6 @@ def _nickname_from_responses(responses, blogger_id='', on_message=None):
             return value
         emit('身份资料响应未取到昵称：{}'.format(getattr(response, 'url', '')))
     return ''
-
-
-def read_nickname(page, responses=(), blogger_id='', on_message=None):
-    """登录后取博主昵称：用户资料响应优先，其次页面状态 / DOM / 标题
-
-    只负责「昵称从哪读」，不构造身份；取不到返回空串，由编排层判定身份
-    不完整并中止。来源写进日志，便于排查取错身份的现场。
-    """
-    def emit(message):
-        if on_message:
-            try:
-                on_message(message)
-            except Exception:
-                pass
-
-    value = _nickname_from_responses(responses, blogger_id, on_message)
-    if value:
-        emit('博主昵称来源：用户资料响应')
-        return value
-    value = _nickname_from_page(page)
-    emit('博主昵称来源：页面状态/DOM/标题')
-    return value
 
 
 # ---------------- 字段读取 ----------------
@@ -462,14 +440,14 @@ def fill_details(context, notes, options, on_article=None, should_stop=None,
 
 
 def fetch_user_notes(target, options=None, since_ts=None,
-                     on_progress=None, should_stop=None,
+                     on_progress=None, should_stop=None, known_ids=None,
                      on_meta=None, on_article=None, verbose=False):
     """
     流式抓取某博主的主页笔记
 
-    顺序固定：打开主页只等 DOM 就绪 → 登录闸门 → 先挂监听再重建目标页
-    （清空登录前数据）→ 读 SSR、取页面昵称并上报 meta → 首屏与滚动发现
-    笔记，每发现一批就逐条取详情立即交给 on_article，不保存全量详情列表。
+    顺序固定：打开主页只等 DOM 就绪 → 登录闸门 → 强制刷新并清空登录前数据 →
+    挂监听、读 SSR、取页面身份并上报 meta → 首屏与滚动发现笔记，每发现一批就
+    逐条取详情立即交给 on_article，不保存全量详情列表。
 
     Args:
         target:       主页链接（建议带 xsec_token）
@@ -478,7 +456,8 @@ def fetch_user_notes(target, options=None, since_ts=None,
         since_ts:     只保留发布时间 >= since_ts 的笔记
         on_progress:  进度/日志回调
         should_stop:  取消检查函数
-        on_meta:      on_meta(nickname) -> dict
+        known_ids:    平台反查到的已下载笔记 ID（不打开详情页）
+        on_meta:      on_meta(nickname, blogger_id, user_url) -> dict
                       返回 {'known_ids': set, 'ok': bool}；必须早于 on_article
         on_article:   on_article(detail) -> bool，返回 False 表示停止
         verbose:      是否打印到控制台
@@ -490,7 +469,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
 
     options = options or {}
     user_id, user_url = parse_user_id(target)
-    profile_dir = options.get('profile_dir') or config.platform_profile_dir('xiaohongshu')
+    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('xiaohongshu')
     headless = bool(options.get('headless', True))
     max_scroll = max(1, int(options.get('max_scroll') or 200))
     idle_rounds = max(1, int(options.get('idle_rounds') or 4))
@@ -509,7 +488,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
     page_index = 0
     stale_run = 0
     early_stop = False
-    skip_ids = set()          # 已下载笔记 ID，由 meta 回传后填入
+    skip_ids = set(known_ids or ())
     detail_stats = {'found': 0, 'filled': 0, 'known': 0, 'skipped': 0}
     stop_reason = 'max_scroll'
     nickname = ''
@@ -634,19 +613,16 @@ def fetch_user_notes(target, options=None, since_ts=None,
                     '未登录 小红书：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(
                         profile_dir))
 
-            # 3. 登录成功后重建页面数据：先清掉登录前的采集缓冲并挂监听，
-            #    再重新进入目标页——刷新过程发出的列表响应同样是登录后数据，
-            #    先挂才不会把首屏接口响应全部漏掉（表现为「0 条作品」）。
-            def attach(target_page):
-                pending[:] = []
-                profile_pending[:] = []
-                pages[:] = []
-                del queue[:]
-                seen_ids.clear()
-                target_page.on('response', on_response)
-
-            browser.reload_after_login(page, user_url, timeout_ms,
-                                       on_before_reload=attach)
+            # 3. 登录成功后强制刷新，丢弃登录前可能累积的一切。
+            #    监听必须在刷新之前挂：刷新过程发出的列表响应同样是登录后数据，
+            #    刷新之后再挂会把首屏接口响应全部漏掉，表现为「0 条作品」。
+            pending[:] = []
+            profile_pending[:] = []
+            pages[:] = []
+            del queue[:]
+            seen_ids.clear()
+            page.on('response', on_response)
+            page.reload(wait_until='domcontentloaded', timeout=timeout_ms)
             note('已登录，刷新页面后重新获取')
 
             # 4. 刷新后读 SSR、取身份并上报 meta
@@ -677,11 +653,15 @@ def fetch_user_notes(target, options=None, since_ts=None,
                     break
                 page.wait_for_timeout(500)
                 waited += 500
-            nickname = read_nickname(page, profile_pending, blogger_id, note)
+            response_nickname = profile_nickname_from_responses(
+                profile_pending, blogger_id, note)
+            nickname = response_nickname or profile_nickname(page)
+            note('博主昵称来源：{}'.format(
+                '用户资料响应' if response_nickname else '页面状态/DOM/标题'))
             if on_meta:
-                info = on_meta(nickname) or {}
+                info = on_meta(nickname, blogger_id, user_url) or {}
                 meta_ok = bool(info.get('ok'))
-                # 已下载笔记 ID 由编排层回传，采集器据此连详情页都不打开
+                # 平台传入的 known_ids 与会话返回的 known_ids 取并集
                 skip_ids |= set(info.get('known_ids') or ())
             else:
                 meta_ok = bool(nickname)
@@ -758,6 +738,5 @@ def fetch_user_notes(target, options=None, since_ts=None,
         'unknown_types': {},
         'details': detail_stats,
         'since_ts': since_ts,
-        'error': '',
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }

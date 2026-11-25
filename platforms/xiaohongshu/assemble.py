@@ -2,7 +2,7 @@
 """
 小红书笔记归一化
 
-把抓取到的原始详情转成统一下载条目，交给 core.pipeline 逐篇下载。
+把抓取到的原始详情转成统一下载条目，交给 core.session 逐篇下载。
 
 与另外两个平台不同的地方有三处：
 1. 请求头要带小红书自己的 Referer，否则 CDN 可能拒
@@ -16,7 +16,7 @@
 import os
 import re
 
-from core import config
+from conf import settings
 from core.utils import safe_name
 from platforms.xiaohongshu import scraper
 
@@ -40,8 +40,8 @@ except Exception:      # 依赖缺失或平台不支持
 
 def headers():
     """下载请求头：公共头 + 平台段里的 referer / accept"""
-    values = dict(config.HEADER)
-    options = config.platform_settings(KEY)
+    values = dict(settings.HEADER)
+    options = settings.platform_settings(KEY)
     if options.get('referer'):
         values['Referer'] = options['referer']
     if options.get('accept'):
