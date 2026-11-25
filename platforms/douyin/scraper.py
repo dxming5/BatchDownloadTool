@@ -7,7 +7,7 @@
 滚动到底部触发翻页，直到接口返回 has_more = 0 为止。
 
 通用浏览器能力（启动上下文、滚动、登录闸门）由 core.browser 提供。
-作品归一化在 assemble.py，逐篇下载由 core.session 负责。
+作品归一化在 assemble.py，逐篇下载由 core.pipeline 负责。
 登录之前不挂响应监听、不读页面状态、不发数据请求；登录后强制刷新页面，
 再取身份并逐页交出作品（不保存全量列表）。
 """
@@ -16,7 +16,7 @@ import json
 import re
 import time
 
-from conf import settings
+from core import config
 from core import browser
 
 API_MARK = '/aweme/v1/web/aweme/post/'
@@ -231,8 +231,16 @@ def parse_sec_user_id(raw):
     raise ValueError('无法从内容中识别 sec_user_id：{}'.format(raw[:80]))
 
 
-def page_nickname(page):
-    """从页面级数据取主页昵称：状态用户对象 → 昵称 DOM → 页面标题"""
+def home_url(sec_user_id):
+    """规范化主页地址；写进 homepage.txt，「更新」时能被再次识别"""
+    return 'https://www.douyin.com/user/{}'.format(sec_user_id)
+
+
+def read_nickname(page):
+    """从页面级数据取主页昵称：状态用户对象 → 昵称 DOM → 页面标题
+
+    只负责「昵称从哪读」，不构造身份；身份由编排层统一冻结。
+    """
     for script in (PAGE_USER_JS, PAGE_NICKNAME_JS):
         try:
             value = (page.evaluate(script) or '').strip()
@@ -274,7 +282,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     from playwright.sync_api import sync_playwright
 
     options = options or {}
-    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('douyin')
+    profile_dir = options.get('profile_dir') or config.platform_profile_dir('douyin')
     headless = bool(options.get('headless', True))
     max_scroll = max(1, int(options.get('max_scroll') or 400))
     idle_rounds = max(1, int(options.get('idle_rounds') or 8))
@@ -285,7 +293,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     stale_limit = max(1, int(options.get('stale_limit') or DEFAULT_STALE_LIMIT))
     first_page_wait = 20000
 
-    user_url = 'https://www.douyin.com/user/{}'.format(sec_user_id)
+    user_url = home_url(sec_user_id)
     blogger_id = parse_sec_user_id(sec_user_id)
     pending = []
     seen_ids = set()
@@ -382,16 +390,20 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                 raise RuntimeError(
                     '未登录 抖音：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(profile_dir))
 
-            # 登录成功：强制刷新，丢弃登录前可能拿到的任何数据
-            page.reload(wait_until='domcontentloaded')
+            # 登录成功：先挂响应监听，再重新进入目标页——刷新过程中的接口
+            # 响应同样是登录后数据，先挂才不会漏掉首屏
+            def attach(target_page):
+                target_page.on('response', on_response)
+
+            browser.reload_after_login(page, user_url, timeout_ms,
+                                       on_before_reload=attach)
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
                   'message': '已登录，刷新页面后重新获取…'})
 
-            # 刷新之后才挂响应监听、读页面状态、等首屏
-            page.on('response', on_response)
-            nickname = page_nickname(page)
+            # 刷新之后才读页面状态、取身份、等首屏
+            nickname = read_nickname(page)
             if on_meta:
-                meta = on_meta(nickname, blogger_id, user_url) or {}
+                meta = on_meta(nickname) or {}
                 meta_ok = bool(meta.get('ok'))
             else:
                 meta_ok = False
@@ -471,6 +483,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
         'stop_reason': stop_reason,
         'cancelled': cancelled(),
         'since_ts': since_ts,
+        'error': '',
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
 
@@ -526,7 +539,7 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
     from playwright.sync_api import sync_playwright
 
     options = options or {}
-    profile_dir = options.get('profile_dir') or settings.platform_profile_dir('douyin')
+    profile_dir = options.get('profile_dir') or config.platform_profile_dir('douyin')
     headless = bool(options.get('headless', True))
     max_scroll = max(1, int(options.get('following_max_scroll') or 200))
     limit = max(0, int(options.get('following_limit') or 0))

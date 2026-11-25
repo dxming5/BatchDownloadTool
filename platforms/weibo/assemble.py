@@ -3,7 +3,7 @@
 微博下载组装（流式归一化）
 
 只负责把一条原始微博归一化成统一下载条目，作者过滤用打开网页时冻结的
-博主名完成；取址、命名、去重、落盘与 ID 记录交给 core.session / downloader。
+博主名完成；取址、命名、去重、落盘与 ID 记录交给 core.pipeline / downloader。
 
 每篇（一条微博）按内容类型走两条链路，取址各不相同：
     图片  mblog.pics[].large.url（缺失时回退 bmiddle / thumbnail / url）
@@ -17,7 +17,7 @@ create_time 保留秒级原始时间戳，由下载层转成文件名前缀；�
 作者不一致的条目也交给会话按现有语义处理，本模块只决定「这篇要不要下」。
 """
 
-from conf import settings
+from core import config
 from core.utils import safe_name
 from platforms.weibo import scraper
 
@@ -26,8 +26,8 @@ KEY = 'weibo'
 
 def headers():
     """下载请求头：公共头 + 平台段里的 referer / accept"""
-    values = dict(settings.HEADER)
-    options = settings.platform_settings(KEY)
+    values = dict(config.HEADER)
+    options = config.platform_settings(KEY)
     if options.get('referer'):
         values['Referer'] = options['referer']
     if options.get('accept'):
@@ -229,7 +229,7 @@ def normalize(mblog, nickname, stats=None):
 
     Args:
         mblog:     scraper 派发的原始微博 dict
-        nickname:  打开网页时冻结的博主名（core.session 已规范化）
+        nickname:  打开网页时冻结的博主名（core.location 已规范化）
         stats:     可选计数器 {原因: 条数}，只用于平台侧跳过汇总日志
 
     Returns:

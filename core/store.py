@@ -2,11 +2,11 @@
 """
 存储模块
 
-博主身份、记录文件与「当前任务目标」。磁盘布局全部在 core.paths，本模块
+博主身份、记录文件与「当前任务目标」。磁盘布局全部在 core.location，本模块
 不做任何路径运算：
 
     Blogger：只持「平台 key + 博主名」，记录文件（homepage.txt / aweme_id.txt）
-        由它读写，位置一律问 core.paths；
+        由它读写，位置一律问 core.location；
     当前任务目标：编排层 activate、结束 clear，下载层与平台层据此向 store
         取博主名、ID 记录与落盘路径，彼此之间不再传递博主对象。
 """
@@ -15,16 +15,18 @@ import os
 
 from pypinyin import lazy_pinyin
 
-from core import paths
+from core import location
 from core.utils import append_list_txt, make_txt, read_txt, rm_dir
 
 
 class Blogger(object):
-    """一位博主：身份是「平台标识 + 博主名」，位置与记录文件都由 paths 给出"""
+    """一位博主：身份是「平台标识 + 博主名」，位置与记录文件都由 core.location 给出"""
 
     def __init__(self, key, name):
-        self.key = key
-        self.name = paths.blogger_name(name)
+        # 定位键在这里一次成型，之后所有路径都只把身份交给 core.location
+        self.identity = location.key_of(key, name)
+        self.key = self.identity['platform']
+        self.name = self.identity['nickname']
 
     def __str__(self):
         return self.name
@@ -33,7 +35,7 @@ class Blogger(object):
 
     def _existing(self, create=False):
         """校验后的博主目录；名字非法、越界或不存在（未要求创建）返回 None"""
-        return paths.existing_dir(self.key, self.name, create)
+        return location.existing_dir(self.identity, create)
 
     def exists(self):
         return self._existing() is not None
@@ -42,7 +44,7 @@ class Blogger(object):
         """创建博主目录与 ID 记录文件，成功返回自身，失败返回 None"""
         if not self._existing(create=True):
             return None
-        make_txt(paths.ids_path(self.key, self.name))
+        make_txt(location.ids_path(self.identity))
         return self
 
     def delete(self):
@@ -58,11 +60,11 @@ class Blogger(object):
     def read_ids(self):
         if not self._existing():
             return set()
-        return set(read_txt(paths.ids_path(self.key, self.name)))
+        return set(read_txt(location.ids_path(self.identity)))
 
     def append_ids(self, ids):
         if self._existing() and ids:
-            append_list_txt(paths.ids_path(self.key, self.name), list(ids))
+            append_list_txt(location.ids_path(self.identity), list(ids))
 
     # ---------------- 主页链接 ----------------
 
@@ -70,7 +72,7 @@ class Blogger(object):
         url = (url or '').strip()
         if not url or not self._existing(create=True):
             return ''
-        path = paths.homepage_path(self.key, self.name)
+        path = location.homepage_path(self.identity)
         with open(path, mode='w', encoding='utf-8') as handle:
             handle.write(url + '\n')
         return path
@@ -79,7 +81,7 @@ class Blogger(object):
         if not self._existing():
             return ''
         try:
-            with open(paths.homepage_path(self.key, self.name),
+            with open(location.homepage_path(self.identity),
                       mode='r', encoding='utf-8') as handle:
                 return handle.read().strip()
         except OSError:
@@ -125,17 +127,44 @@ def platform_bloggers(key, video_exts=('.mp4',)):
     """平台目录下的博主列表：仅有下载内容的目录，按 blogger_order 排序
 
     列举平台目录属于集合语义，由本模块做；「一个目录算不算博主目录」
-    仍交给 core.paths 判定，路径与布局规则不在本模块重复。
+    仍交给 core.location 判定，路径与布局规则不在本模块重复。
     """
     try:
-        entries = os.listdir(paths.platform_dir(key))
+        entries = os.listdir(location.platform_dir(key))
     except OSError:
         return []
-    bloggers = [Blogger(key, name) for name in entries
-                if not name.startswith('.')
-                and paths.is_blogger_dir(key, name, video_exts)]
-    bloggers.sort(key=lambda blogger: blogger_order(blogger.name))
+    bloggers = []
+    for name in entries:
+        if name.startswith('.'):
+            continue
+        blogger = Blogger(key, name)
+        if location.is_blogger_dir(blogger.identity, video_exts):
+            bloggers.append(blogger)
+    bloggers.sort(key=lambda item: blogger_order(item.name))
     return bloggers
+
+
+def find_by_user_id(key, user_id, user_id_of=None):
+    """按主页链接里的账号标识找已有博主目录；找不到返回 None
+
+    用途：博主改名后页面昵称已与目录名不同，按名字定位会新建目录并重复
+    下载；按主页链接里的账号标识能对上原目录。标识解析交给调用方传入
+    （平台自己的解析函数），本模块不认任何平台字段。
+    """
+    wanted = (user_id or '').strip()
+    if not wanted or not callable(user_id_of):
+        return None
+    for blogger in platform_bloggers(key):
+        homepage = blogger.read_homepage()
+        if not homepage:
+            continue
+        try:
+            found = (user_id_of(homepage) or '').strip()
+        except Exception:
+            found = ''
+        if found and found == wanted:
+            return blogger
+    return None
 
 
 # ---------------- 当前任务目标 ----------------
@@ -190,11 +219,11 @@ def id_recorder():
 def part_path(create_time, index):
     """下载中的临时文件路径（当前任务目标）"""
     target = _active('取临时路径')
-    return paths.part_path(target.key, target.name, create_time, index)
+    return location.part_path(target.identity, create_time, index)
 
 
 def media_path(create_time, index, ext, is_video):
     """最终落盘路径（当前任务目标）"""
     target = _active('取落盘路径')
-    return paths.media_path(target.key, target.name, create_time, index,
-                            ext, is_video)
+    return location.media_path(target.identity, create_time, index,
+                               ext, is_video)

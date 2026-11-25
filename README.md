@@ -41,8 +41,7 @@ BatchDownloadTool/
 │   └── settings.py            # 配置读取（固定读 conf/config.ini，按平台分段）
 ├── core/                      # 公用层：与平台无关的机制
 │   ├── task.py                # 任务状态、日志、失败清单、取消、收口统计
-│   ├── session.py             # DownloadSession：身份冻结、逐篇调度、流式收口
-│   ├── pipeline.py            # 编排：认平台 → 登录闸门 → 流式逐篇下载 → 收口
+│   ├── pipeline.py            # 编排：认平台 → 冻结身份 → 流式逐篇下载 → 收口
 │   ├── registry.py            # 平台注册表（key / 显示名 / 链接识别）
 │   ├── store.py               # 磁盘布局（博主对象）、去重记录、主页链接
 │   ├── browser.py             # 通用浏览器能力（启动、滚动、登录闸门、登录等待）
@@ -104,7 +103,7 @@ BatchDownloadTool/
 - 相对路径按**启动程序时所在的工作目录**解析，换目录启动会指向不同位置，建议直接写绝对路径
 - 每个博主一个目录 `{download_dir}/{平台 key}/{博主名}/`，不存在时自动创建
 - 平台目录下的一级子目录中，含 `homepage.txt`、`picture/` 或有视频文件才算博主；零散文件与 `.cache/` 等隐藏目录会被忽略
-- 目录结构只由 `core/paths.py` 计算与提供：博主目录、图片目录、缓存目录、落盘路径与「这是不是缓存文件」的判定都由它给出，其它模块不拼目录、不接收目录参数
+- 目录结构只由 `core/location.py` 计算与提供：博主目录、图片目录、缓存目录、落盘路径与「这是不是缓存文件」的判定都由它给出，其它模块不拼目录、不接收目录参数
 - 把已有的博主目录整个拷进对应平台目录，重启后界面即可识别并预览（缺 `homepage.txt` 时「更新」按钮不可用）
 - 从旧版本升级：把 `download_dir` 的末尾去掉一级平台目录即可（例如原来填 `F:/图片/douyin/`，改为 `F:/图片/`），原有博主目录会直接成为平台目录，无需移动文件
 
@@ -186,19 +185,20 @@ python web_app.py
 - 首次使用或登录失效时，程序会等待最多 `wait_login_seconds` 秒（默认 180），期间在弹出的浏览器窗口里扫码；`headless = true` 时窗口不可见，首次登录需先改成 `false`
 - 登录态只认程序自己的浏览器数据目录（自己平时浏览器里的登录**无效**）；微博还会以接口返回的 `data.login` 复核
 - 等待超时仍未登录：任务进入 `error`，按「未登录 <平台>：请在浏览器窗口完成登录后重试（登录态保存在 <profile_dir>）」提示，**一篇都不下载**；用户取消则任务为 `cancelled`
-- 登录成功后强制刷新一次页面，丢弃登录前可能累积的响应与条目；刷新完成后才挂响应监听 / 读页面状态 / 发接口请求
+- 登录成功后先挂监听、再重新进入主页（`core/browser.py` 的 `reload_after_login`），丢弃登录前可能累积的响应与条目；重建完成后才读页面状态 / 取昵称
 
 ### 身份信息单点获取
 
-打开网页、过登录闸门并刷新后，由平台从**页面级数据**一次性取平台 key、平台显示名、博主名、博主 ID 与主页链接，交 `DownloadSession.meta()` 冻结为整个任务共享的一份内存数据：
+账号标识与规范化主页链接在链接解析阶段就得到（`platform.parse_target(url)` 返回二元组）；过完登录闸门并重建页面后，平台只从**页面级数据**取博主昵称，交 `pipeline` 的 `on_meta(nickname)` 冻结为整个任务共享的一份内存数据：
 
-- 唯一构造点是 `core/session.py` 的 `IDENTITY_FIELDS` 与 `identity()`；`Task.set_identity()` 只做投影，平台只回报原始三元组
-- 来源按平台固定优先级（昵称与 ID 任一取不到即 `error` 并中止，不下载任何内容）：
-  - 抖音：页面状态里的用户对象 → 主页昵称 DOM → `page.title()` 去掉 ` - 抖音` 后缀 → 空；ID 用 `parse_sec_user_id(target)`
-  - 微博：页面内用户配置或主页昵称 DOM → `page.title()` 按 `的微博` 截断 → `page.title()` 原文 → 空；ID 用 `parse_uid(target)`
-  - 小红书：`__INITIAL_STATE__.user` 下的基本信息 → 主页昵称 DOM → `page.title()` 按 ` - ` 截断 → 空；ID 用 `parse_user_id(target)`
-- **只从页面自身取，不遍历作品/笔记/微博条目取作者名**；作者过滤使用冻结后的博主名，一次任务只对应一个博主目录
-- 身份信息**只在内存里传递，不新增文件、不落盘**（浏览器登录态仍在 `.pw_profile/<平台 key>`）；`blogger_id` 不参与目录定位，目录名仍是博主名
+- 唯一构造点是 `core/location.py` 的 `identity()`；`Task.set_identity()` 只做投影，平台只交昵称
+- 昵称来源按平台固定优先级（昵称或 ID 任一取不到即 `error` 并中止，不下载任何内容）：
+  - 抖音：页面状态里的用户对象 → 主页昵称 DOM → `page.title()` 去掉 ` - 抖音` 后缀 → 空
+  - 微博：页面内用户配置或主页昵称 DOM → `page.title()` 按 `的微博` 截断 → `page.title()` 原文 → 空
+  - 小红书：用户资料响应（排除 `/user/me`）→ `__INITIAL_STATE__.user` 下的基本信息 → 主页昵称 DOM → `page.title()` 按 ` - ` 截断 → 空
+- **只从页面自身取，不遍历作品/笔记/微博条目取作者名**；作者过滤使用同一昵称，一次任务只对应一个博主目录
+- 目录定位**先按主页链接里的账号标识复用已有目录**（博主改名也能续上，日志会提示「复用已有目录」），找不到再按昵称定位或新建；`blogger_id` 本身不参与目录命名
+- 身份信息**只在内存里传递，不新增文件**（浏览器登录态仍在 `.pw_profile/<平台 key>`）；写盘只有既有的 `homepage.txt`（主页链接）与 `aweme_id.txt`（已下载 ID）
 
 ### 其余约定
 
@@ -316,21 +316,22 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 ## 项目架构
 
-项目按「公用层 + 平台实现层」组织：公用层只写机制（任务、会话、编排、存储、命名、浏览器、单篇下载、媒体），平台层写规则（链接识别、登录闸门、页面身份获取、条目发现、类型判定、取地址、归一化）。
+项目按「公用层 + 平台实现层」组织：公用层只写机制（任务、编排、存储、命名、浏览器、单篇下载、媒体），平台层写规则（链接识别、登录闸门常量、页面昵称获取、条目发现、类型判定、取地址、归一化）。
 
-关键约定：**统一流式契约**。`platform.scrape_stream(target, options, session, ...)` 负责打开网页 → 登录闸门 → 刷新 → 一次性上报身份 → 逐条交出归一化 article；`DownloadSession` 负责冻结身份、逐篇调用 `downloader.fetch_article()`、统计与收口。article 只含 `id` / `create_time` / `urls` / `kind`，作者过滤已在平台层用冻结昵称完成；身份与 `store` 目标只在内存里传递，不新增文件。
+关键约定：**统一流式契约**。`platform.scrape_stream(target_url, options, on_meta, on_article, ...)` 负责 S1 打开 → S2 登录闸门 → S3 重建页面并取昵称 → S4 逐条交出归一化 article；身份冻结、目录定位、逐篇调用 `downloader.fetch_article()`、统计与收口都在 `core/pipeline.py`。article 只含 `id` / `create_time` / `urls` / `kind`，作者过滤已在平台层用同一昵称完成；身份与 `store` 目标只在内存里传递，不新增文件。
+
+> 分层架构图、模块依赖图、端到端时序图、任务状态机与并发模型见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
 | 模块 | 职责 |
 |---|---|
 | `web_app.py` | 程序入口：寻找空闲端口、启动 Flask、自动打开浏览器 |
-| `conf/settings.py` | 配置读取（固定读 `conf/config.ini`，按平台分段并合并默认值） |
+| `core/config.py` | 配置读取（固定读 `conf/config.ini`，按平台分段并合并默认值） |
 | `core/task.py` | 任务状态、日志、失败清单、取消、快照；`stream` 只记日志，收口统计只在 `finished` 写一次 |
-| `core/session.py` | `DownloadSession`：身份冻结、已下载 ID 查询、逐篇调度、统计与收口；`identity()` / `IDENTITY_FIELDS` 是身份唯一构造点 |
-| `core/pipeline.py` | 编排：认平台 → 创建会话 → `scrape_stream` 流式逐篇 → 收口；关注列表走独立的 `run_following()` |
+| `core/pipeline.py` | 编排：认平台 → 冻结身份与定位目录（`on_meta`）→ `scrape_stream` 流式逐篇（`on_article`）→ 收口；关注列表走独立的 `run_following()` |
 | `core/registry.py` | 平台注册表（key、显示名、链接识别） |
-| `core/paths.py` | 磁盘布局的唯一出处：下载根、平台目录、博主目录、`picture/` 与缓存目录、落盘与缓存文件路径、相对/绝对互转、越界校验、博主目录判定 |
-| `core/store.py` | 博主身份与记录：`Blogger` 只持平台 key + 博主名，读写 `homepage.txt` / `aweme_id.txt`；另有「当前任务目标」（`activate` / `clear`）供下载层与平台层取博主名、ID 与路径 |
-| `core/browser.py` | 通用浏览器能力（持久化上下文、滚动、登录态判断、统一登录闸门与等待、响应 JSON） |
+| `core/location.py` | 磁盘布局与身份的唯一出处：下载根、平台目录、博主目录、`picture/` 与缓存目录、落盘与缓存文件路径、相对/绝对互转、越界校验、博主目录判定、`identity()` |
+| `core/store.py` | 博主身份与记录：`Blogger` 只持平台 key + 博主名，读写 `homepage.txt` / `aweme_id.txt`；`find_by_user_id()` 按主页链接标识复用目录；另有「当前任务目标」（`activate` / `clear`） |
+| `core/browser.py` | 通用浏览器能力（持久化上下文、滚动、登录态判断、统一登录闸门与等待、`reload_after_login` 先挂监听再重建页面、响应 JSON） |
 | `core/downloader.py` | 时间戳转文件名前缀、`fetch_article()` 单篇入口、`fetch_all()` 单地址下载（重试、清理半成品、扩展名探测）与并发调度；落盘路径向 `store` / `paths` 要，不拼目录 |
 | `core/utils.py` | UTF-8 编码配置、文本读写、建目录、安全文件名 |
 | `platforms/base.py` | 平台接口约定（`match` / `parse_target` / `scrape_stream` / `headers` / `post_process` / `options`；可选 `following` / `user_id_of`） |
@@ -344,38 +345,41 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 ### 下载流程
 
-一次任务是**流式逐篇**处理，不再「先抓完再下载」：
+流程只有一条，平台只替换「方言」，不改变顺序：
 
-1. `platform.scrape_stream(target, options, session, ...)` —— 打开网页 → 登录闸门（未登录等待、超时中止、登录前不取数据）→ 登录成功后强制刷新 → 从页面级数据取身份 → `session.meta(info)` 一次性冻结 → 翻页/取详情时逐条交出归一化 article（`id` / `create_time` / `urls` / `kind`）
-2. `DownloadSession.article(article)` —— 立即调用 `downloader.fetch_article()` 处理该篇，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.{扩展名}` 落盘；这篇处理完成后采集器才继续取下一篇
-3. 结束由 `pipeline.run()` 收口：按统计与 `stop_flag` 一次性判定状态，写 `done` / `total` / 失败清单与 `finished` 事件
+1. **S0 编排**（`pipeline.run`）：认平台 → `parse_target(url)` 得到账号标识与规范化主页链接 → 组 `options` / `since_ts` → 建任务统计
+2. **S1 打开**：启动持久化上下文，`goto` 只等 DOM 就绪；登录前不挂监听、不读状态、不发内容请求
+3. **S2 登录闸门**：已登录直接过；未登录等待扫码，超时或取消即中止，一篇都不下
+4. **S3 重建页面数据**：3.1 公共层先挂监听再重新进入主页（`reload_after_login`）；3.2 平台只取昵称（`read_nickname`）；3.3 `on_meta(nickname)` 冻结身份——校验、定位或新建目录、写 `homepage.txt`、`store.activate`、读入已知 ID
+5. **S4 发现并逐篇下载**：平台发现条目 → 归一化成 article → `on_article(article)` 立即调用 `downloader.fetch_article()`，按 `{发布时间}.mp4` / `picture/{发布时间} - {序号}.{扩展名}` 落盘；这篇完成后才继续下一篇
+6. **S5 收口**：`close()` 回收本次新建的空目录、输出跳过汇总、`store.clear()`；状态判定只在 `pipeline.run()` 一个出口，写 `done` / `total` / 失败清单与 `finished` 事件
 
-编排层在 `session.meta()` 里把本次目标登记给 `store`（`activate`，`session.close()` 里幂等 `clear`），落盘路径由 `store` 现算。下载层只判断「视频还是图片」，向 `store` 要路径——既不接收博主对象，也不接收任何目录参数。一篇内的媒体地址交给线程池（`[download] workers`，默认 1 表示逐个下载），全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`）。
+目录定位先按主页链接里的账号标识找已有目录（改名也能续上），找不到才按昵称；落盘路径由 `store` 现算，下载层既不接收博主对象，也不接收目录参数。一篇内的媒体地址交给线程池（`[download] workers`，默认 1 表示逐个下载），全部成功才把篇 ID 写入 `aweme_id.txt`（抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`）。
 
 分工边界：
 
 | 层 | 负责 |
 |---|---|
-| 平台 `scrape_stream()` | 登录闸门、页面级身份获取与上报、条目发现与归一化、作者过滤；不再返回全量结果 |
-| `core/session.py` | 冻结身份与已下载 ID 查询、逐篇调度、无时间/无媒体/失败统计、取消检查、收口 |
+| 平台 `scrape_stream()` | 调用登录闸门、页面昵称获取（`read_nickname`）、条目发现与归一化、作者过滤；不返回全量结果 |
+| `core/pipeline.py` | 身份冻结与目录定位（`on_meta`）、逐篇下载调度（`on_article`）、统计、取消检查与收口 |
+| `core/browser.py` | 持久化上下文、登录闸门、统一的「先挂监听再重建页面」（`reload_after_login`）、滚动 |
 | `core/downloader.py` | `fetch_article` 复用 `fetch_all` 做重试与扩展名探测、批量并发、按篇聚合写 ID；落盘路径向 `store` 要，不拼目录 |
 | `core/task.py` | 维护日志、失败清单、取消状态；`stream` 只记日志，`finished` 一次性写收口统计 |
-| `core/pipeline.py` | 串联流式会话，处理取消与「没有可下载内容」的收尾 |
 
 #### 不显示进度条，快照统计字段仅用于收口汇总
 
 界面不渲染进度条，也不显示百分比与 `done/total` 文本。`done` / `total` / `percent` 仍保留在任务快照里（API 兼容），但只在任务收口时由一次 `finished` 事件写入：`done` = 成功文件数，`total` = 本次处理文件数，`percent` 由两者算一次；不再有逐文件的进度上报与刷新。日志仍保留每个媒体一条「正在下载 xxx」，失败条目进失败清单。
 
-- 已下载的篇由 `session.meta()` 返回的 `known_ids` 与下载层按篇 ID 统一校验、直接排除，不计入本次处理数
+- 已下载的篇由 `on_meta()` 返回的 `known_ids` 与下载层按篇 ID 统一校验、直接排除，不计入本次处理数
 - 一篇内的多个媒体仍属于同一篇；去重与断点续传按篇粒度：一个下载单元一个 ID，全部成功才记录
-- **新增平台必须遵守**：实现 `scrape_stream()`，从页面取身份后先 `session.meta()`，再逐条 `session.article()`；**不要给下载层传博主对象或任何目录**——落盘路径由 `store` 的当前任务目标给出。命名、扩展名探测、去重校验都由下载层负责，平台只管归一化条目，不要自己维护 `done` / `total`；平台层不出现任何路径拼接
+- **新增平台必须遵守**：实现 `scrape_stream()`，重建页面后先交昵称给 `on_meta(nickname)`，再逐条归一化后交 `on_article(article)`；**不要给下载层传博主对象或任何目录**——落盘路径由 `store` 的当前任务目标给出。命名、扩展名探测、去重校验都由下载层负责，平台只管归一化条目，不要自己维护 `done` / `total`；平台层不出现任何路径拼接
 
 #### ID 记录约定：一篇一个 ID，全部成功才记录
 
 断点续传与去重共用一个粒度：`{博主目录}/aweme_id.txt` 里一行一个篇 ID（文件名沿用历史命名，三个平台通用，内容分别为抖音 `aweme_id` / 小红书 `note_id` / 微博 `mblog_id`）。
 
 - 一篇内的全部媒体都下载成功，才在篇完成时写入该篇 ID；任一张失败或没有可用地址，整篇都不记录
-- 下载前先把记录读成内存 `set`，由 `session.meta()` 与下载层统一校验；篇 ID 已存在就整篇排除（不计入本次处理数）
+- 下载前先把记录读成内存 `set`，由 `on_meta()` 读入、下载层统一校验；篇 ID 已存在就整篇排除（不计入本次处理数）
 - 上次部分失败的篇不会留下半篇记录，下次整篇重下（同名文件覆盖），保证「有记录 = 这一篇完整」
 - ID 攒够 20 个批量追加一次，任务结束或取消时再补写一次；读取时忽略空行，不依赖文件顺序
 - **新增平台必须遵守**：一篇一个 ID、全部成功才记录，不要按单张图片或单个 URL 记录
@@ -391,8 +395,8 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 
 ### 新增平台步骤
 
-1. 在 `platforms/<key>/` 下实现 `scraper.py`（登录闸门 + 翻页/详情发现 + 页面级身份获取）与 `assemble.py`（条目归一化函数）
-2. 新建 `platforms/<key>/__init__.py`，继承 `platforms/base.py` 的 `Platform`，声明 `key`、`label`、`media_label` 并实现 `match` / `parse_target` / `scrape_stream`（内部先 `session.meta()` 上报身份，再逐条 `session.article()`），不再实现 `scrape` / `assemble`
+1. 在 `platforms/<key>/` 下实现 `scraper.py`（登录闸门 + 翻页/详情发现 + 页面昵称获取）与 `assemble.py`（条目归一化函数）
+2. 新建 `platforms/<key>/__init__.py`，继承 `platforms/base.py` 的 `Platform`，声明 `key`、`label`、`media_label` 并实现 `match` / `parse_target`（返回 `(账号标识, 规范化主页链接)`）/ `scrape_stream`（内部先交昵称给 `on_meta(nickname)`，再逐条归一化后交 `on_article(article)`），不再实现 `scrape` / `assemble`
 3. 在 `platforms/__init__.py` 中 `import` 并 `registry.register(...)`；前端平台下拉框与博主分组会自动出现，无需改前端
 4. 登录态目录默认落在 `.pw_profile/<key>`，无需额外配置；需要专属下载头时实现 `headers()`，需要落盘后处理时实现 `post_process()`
 5. 需要支持「关注列表」时再实现 `following()` 与 `user_id_of()`，并把 `supports_following` 置为 `True`；路由与前端按钮会自动出现（可选）

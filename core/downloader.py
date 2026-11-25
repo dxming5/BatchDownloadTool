@@ -26,7 +26,7 @@ from datetime import datetime
 from urllib import request
 from urllib.parse import urlparse
 
-from conf import settings
+from core import config
 from core import store
 
 # ---------------- 扩展名 ----------------
@@ -153,7 +153,7 @@ def ext_from_url(url):
 # ---------------- 单文件下载 ----------------
 
 def _build_opener(headers):
-    opener = request.build_opener(request.HTTPSHandler(context=settings.SSL_CONTEXT))
+    opener = request.build_opener(request.HTTPSHandler(context=config.SSL_CONTEXT))
     if headers:
         opener.addheaders = list(headers.items())
     return opener
@@ -181,10 +181,10 @@ def fetch_media(url, create_time, index, headers, log=None):
     target = store.part_path(create_time, index)
     content_type = ''
     logged = False
-    for attempt in range(settings.MAX_RETRY + 1):
+    for attempt in range(config.MAX_RETRY + 1):
         try:
             opener = _build_opener(headers)
-            with opener.open(url, timeout=settings.DOWNLOAD_TIMEOUT) as response, \
+            with opener.open(url, timeout=config.DOWNLOAD_TIMEOUT) as response, \
                     open(target, 'wb') as handle:
                 content_type = response.headers.get_content_type() or ''
                 if log and not logged:
@@ -214,7 +214,7 @@ def fetch_media(url, create_time, index, headers, log=None):
             return True, final, ''
         except Exception as error:
             _cleanup(target)
-            if attempt >= settings.MAX_RETRY:
+            if attempt >= config.MAX_RETRY:
                 return False, target, '超过最大重试次数，最后异常：{}'.format(error)
             time.sleep(random.uniform(0.5, 1.5))
     return False, target, '下载失败'

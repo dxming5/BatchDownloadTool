@@ -21,8 +21,8 @@ from flask import Flask, Response, jsonify, request
 from markupsafe import escape
 
 import platforms  # noqa: F401  导入即注册平台
-from conf import settings
-from core import paths, registry, store
+from core import config
+from core import location, registry, store
 from core.pipeline import run as run_pipeline, run_following
 from core.task import Task
 from core.utils import make_dir
@@ -125,7 +125,7 @@ def _static_stamp(static_folder):
 def create_app():
     """构建 Flask 应用"""
     app = Flask(__name__,
-                static_folder=os.path.join(settings.BASE_DIR, 'static'),
+                static_folder=os.path.join(config.BASE_DIR, 'static'),
                 static_url_path='/static')
     try:
         app.json.ensure_ascii = False
@@ -143,7 +143,7 @@ def create_app():
         html = html.replace('/static/app.js', '/static/app.js?v=' + stamp)
         html = html.replace('/static/style.css', '/static/style.css?v=' + stamp)
         # 浏览器标签标题由配置注入（escape 防止配置里的标签被当 HTML 解析）
-        html = html.replace('{{SITE_TITLE}}', str(escape(settings.WEB_TITLE)))
+        html = html.replace('{{SITE_TITLE}}', str(escape(config.WEB_TITLE)))
         response = Response(html, mimetype='text/html')
         response.headers['Cache-Control'] = 'no-cache, must-revalidate'
         return response
@@ -164,7 +164,7 @@ def create_app():
             request.path == '/api/media'
             and response.status_code == 200
             and request.args.get('v')
-            and (request.args.get('thumb') or paths.is_cover(rel))
+            and (request.args.get('thumb') or location.is_cover(rel))
         )
         if versioned:
             response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -329,7 +329,7 @@ def create_app():
         if blogger:
             ident = '&platform={}&name={}'.format(quote(platform_key), quote(name))
             # 遍历规则（跳过缓存等隐藏目录）由 store 给出，路由层不复制布局
-            for full in paths.media_files(blogger.key, blogger.name, MEDIA_EXTS):
+            for full in location.media_files(blogger.identity, MEDIA_EXTS):
                 try:
                     info = os.stat(full)
                 except OSError:
@@ -337,7 +337,7 @@ def create_app():
                 file_name = os.path.basename(full)
                 lower = file_name.lower()
                 mtime = int(info.st_mtime)
-                rel = paths.relative(full)
+                rel = location.relative(full)
                 kind = 'video' if lower.endswith(VIDEO_EXTS) else 'image'
                 item = {
                     'name': file_name,
@@ -353,7 +353,7 @@ def create_app():
                     cover = cover_path(blogger, full, mtime)
                     if os.path.isfile(cover):
                         item['cover'] = '/api/media?path=' + quote(
-                            paths.relative(cover))
+                            location.relative(cover))
                 items.append(item)
         # 仅影响预览展示：按文件名降序
         items.sort(key=lambda item: item['name'], reverse=True)
@@ -366,10 +366,10 @@ def create_app():
         payload = request.get_json(silent=True) or {}
         blogger = store.blogger((payload.get('platform') or '').strip(),
                                 (payload.get('name') or '').strip())
-        target = paths.resolve(payload.get('path', ''))
+        target = location.resolve(payload.get('path', ''))
         if not blogger or not target or not target.lower().endswith(VIDEO_EXTS):
             return jsonify({'error': '无效的视频路径'}), 400
-        if not paths.is_inside(blogger.key, blogger.name, target):
+        if not location.is_inside(blogger.identity, target):
             return jsonify({'error': '无效的视频路径'}), 400
 
         data = (payload.get('data') or '').strip()
@@ -390,7 +390,7 @@ def create_app():
         except OSError as error:
             return jsonify({'error': '封面写入失败：{}'.format(error)}), 500
 
-        return jsonify({'cover': '/api/media?path=' + quote(paths.relative(output))})
+        return jsonify({'cover': '/api/media?path=' + quote(location.relative(output))})
 
     # ---------------- 媒体回放 ----------------
 
