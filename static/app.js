@@ -16,6 +16,7 @@
     galleryLoading: false,
     galleryScroll: { image: 0, video: 0 },   /* 两个标签各自的滚动位置 */
     scrapeReady: true,
+    lastPhase: '',
     platforms: [],          /* [{key, label}]，来自 /api/status，新增平台自动出现 */
     downloadMode: 'link',   /* link / following：两种下载方式同级切换 */
     platformFilter: '',     /* 博主列表的平台筛选，空表示全部 */
@@ -238,7 +239,7 @@
     $('followingToggle').setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
-  /* 开始下载后把关注列表浮层收起，让状态与日志占满视野 */
+  /* 开始下载后把关注列表浮层收起，让日志与进度占满视野 */
   function collapseFollowing() {
     setFollowingOpen(false);
   }
@@ -311,6 +312,7 @@
     if (task.mode === 'following') setDownloadMode('following');
     state.taskId = task.id;
     state.logLength = 0;
+    state.lastPhase = task.phase;
     /* 批量更新时保留前面博主的日志，整批共用一块日志框 */
     if (!state.batch) {
       $('logBox').textContent = '';
@@ -403,26 +405,27 @@
     refreshBloggers();
   }
 
-  /* 阶段文案：后端新增 stream（抓取与下载交错），未列出的阶段原样显示 */
-  var phaseNames = {
-    scrape: '抓取中',
-    stream: '逐篇抓取下载中',
-    download: '下载中',
-    following: '读取关注列表'
-  };
-
-  function taskStatusText(task) {
-    if (!task || !task.phase) return '';
-    var phase = phaseNames[task.phase] || task.phase;
-    var stateText = task.status === 'done' ? '完成'
-      : task.status === 'error' ? '失败'
-      : task.status === 'cancelled' ? '已取消' : '';
-    var name = task.blogger ? ' · ' + task.blogger : '';
-    return phase + (stateText ? '（' + stateText + '）' : '') + name;
-  }
-
   function renderTask(task) {
-    $('taskStatus').textContent = taskStatusText(task);
+    var scraping = task.phase === 'scrape' && task.status === 'running';
+    var following = task.phase === 'following' && task.status === 'running';
+    /* 进度条只表示下载进度：抓取阶段没有可靠总量，条保持不动 */
+    var percent = (scraping || following) ? 0 : (task.percent || 0);
+    $('bar').style.width = percent + '%';
+
+    /* 条上文字只表示下载进度，抓取与关注列表阶段不另报人数 */
+    $('progressValue').textContent =
+      percent + '%（' + (task.done || 0) + '/' + (task.total || 0) + '）';
+
+    /* 下载阶段在百分比前带上博主名：抓取阶段这里还是链接里的 uid，不显示 */
+    $('progressName').textContent =
+      (!scraping && !following && task.blogger) ? task.blogger + ' ·' : '';
+
+    /* 抓取转入下载时刷新博主列表，让本次新出现的博主立刻显示出来 */
+    if (!state.batch && state.lastPhase && state.lastPhase !== task.phase) {
+      refreshBloggers();
+    }
+    state.lastPhase = task.phase;
+
     if (task.status === 'running') {
       $('cancelBtn').disabled = false;
     }
@@ -589,7 +592,7 @@
     }
     queue.forEach(function (url) { state.following.queued[url] = 1; });
 
-    /* 入队即开始下载：收起关注列表面板，把状态和日志露出来 */
+    /* 入队即开始下载：收起关注列表面板，把日志和进度露出来 */
     collapseFollowing();
 
     state.batch = {

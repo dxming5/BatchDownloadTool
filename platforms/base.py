@@ -4,7 +4,7 @@
 
 公用层不认识任何平台字段，只通过这里的东西与平台交互：
     Platform     平台需要实现的成员
-    流式契约      平台打开网页后先冻结身份，再逐篇交出条目交给会话下载
+    抓取结果      平台自定结构，原样交回平台自己解析与下载
 """
 
 from conf import settings
@@ -15,19 +15,20 @@ class Platform(object):
     平台实现需要覆盖的成员
 
     必须：
-        key                    平台标识，同时作为下载根下的目录名
-        label                  界面显示名
-        match(url)             链接是否属于本平台
-        parse_target           从链接取出目标标识
-        scrape_stream          打开网页、过登录闸门后流式发现条目并逐篇下载
+        key            平台标识，同时作为下载根下的目录名
+        label          界面显示名
+        match(url)     链接是否属于本平台
+        parse_target   从链接取出目标标识
+        scrape         抓取并返回平台自定的结果结构
+        assemble       这批内容怎么下（挑条目、取地址、命名材料都由平台决定）
 
     可选：
-        headers()              下载用的请求头
-        post_process           落盘后的处理（如 HEIC 转 JPG）
-        options()              该平台的抓取参数
+        headers()      下载用的请求头
+        post_process   落盘后的处理（如 HEIC 转 JPG）
+        options()      该平台的抓取参数
         supports_following / following()
-                               抓当前登录账号的关注列表（只出链接，不下载）
-        user_id_of()           从主页链接取账号标识，用于判断是否已有下载目录
+                       抓当前登录账号的关注列表（只出链接，不下载）
+        user_id_of()   从主页链接取账号标识，用于判断是否已有下载目录
     """
 
     key = ''
@@ -43,25 +44,17 @@ class Platform(object):
     def parse_target(self, url):
         raise NotImplementedError
 
-    def scrape_stream(self, target, options, session,
-                      on_progress=None, should_stop=None):
-        """打开目标网页，过登录闸门后流式逐篇处理，不再返回全量结果。
+    def scrape(self, target, options, on_progress=None, should_stop=None):
+        raise NotImplementedError
 
-        三平台统一顺序：
-            1. page.goto 只等 DOM 就绪，不注册响应监听、不读页面状态、不发数据请求；
-            2. 用 core.browser.ensure_logged_in 等待登录，失败即中止；
-            3. 登录后强制刷新页面，丢弃登录前可能拿到的任何数据；
-            4. 从页面级数据取昵称/ID，先调用一次 session.meta() 冻结身份；
-            5. 逐页/逐详情发现条目，归一化成统一 article 后调用 session.article()，
-               session.article() 返回 False 时立即停止翻页。
+    def assemble(self, result, on_progress=None, should_stop=None,
+                 media_label=''):
+        """这批内容怎么下：挑哪些、地址怎么取由平台决定
 
-        article 只含 {'id', 'create_time'(raw 时间戳), 'urls', 'kind'}，不含 author；
-        作者过滤由平台归一化函数用冻结后的博主名完成。on_meta 必须早于任何 on_article。
-
-        Returns:
-            dict: {'pages': 翻页数, 'count': 交出的条目数,
-                   'cancelled': 是否被取消, 'stop_reason': 结束原因,
-                   'unknown_types': 未知类型统计}
+        博主名与已记录的 ID 由 store 提供（编排层已 activate）；把条目整理成
+        (篇 ID, 发布时间, [地址]) 交给 downloader.fetch_all，由下载层统一校验
+        去重、拼文件名落盘、并发下载与按地址计进度。平台既不接收博主对象，
+        也不接收目录或路径参数，落盘路径由下载层向 store 要。
         """
         raise NotImplementedError
 

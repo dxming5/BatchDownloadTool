@@ -62,7 +62,7 @@ main {
   align-items: stretch;
 }
 
-/* 左栏：下载（解析 + 状态日志）在上，博主管理占用下方剩余空间 */
+/* 左栏：下载（解析 + 进度）在上，博主管理占用下方剩余空间 */
 .col-left {
   display: flex;
   flex-direction: column;
@@ -343,7 +343,7 @@ textarea {
   display: none !important;
 }
 
-/* ---------- 分隔、状态与日志 ---------- */
+/* ---------- 进度 ---------- */
 
 .divider {
   height: 1px;
@@ -351,12 +351,60 @@ textarea {
   margin: 12px 0 12px;
 }
 
-/* 任务状态：阶段 / 状态文案与博主名 */
-.task-status {
-  margin: 10px 0 0;
+/* 进度条独占一行；文字绝对定位叠在条上，不占位也不改变条长 */
+.progress-row {
+  position: relative;
+}
+
+.progress {
+  height: 10px;
+  border-radius: 999px;
+  background: #12161d;
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.bar {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #2f7bff, #7a4dff);
+  transition: width .3s ease;
+}
+
+/* 叠在 10px 条上的进度文字：不进条内，避开 overflow 裁剪 */
+.progress-text {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  font-size: 10px;
+  line-height: 1;
+  color: #e6edf9;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .65);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+  /* 博主名 + 百分比横排：名字可收缩，百分比不收缩 */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 16px);
+}
+
+.progress-name {
+  min-width: 0; /* 允许收缩，否则 ellipsis 不生效 */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.progress-name:empty {
+  display: none; /* 抓取阶段没有名字时不留 gap 空隙 */
+}
+
+.progress-value {
+  flex: none; /* 百分比与条数永远完整显示 */
 }
 
 .log {

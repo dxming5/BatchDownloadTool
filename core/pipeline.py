@@ -9,7 +9,7 @@
 import time
 
 from core import registry, store
-from core.session import DownloadSession
+from core.utils import safe_name
 
 
 def resolve_platform(url):
@@ -40,87 +40,52 @@ def run(url, month_days, task):
     options = platform.options()
     options['since_ts'] = (int(time.time()) - month_days * 86400) if month_days else None
 
-    # ---------------- 流式会话 ----------------
-    # 抓取与下载交错进行，阶段固定为 stream，避免界面在 scrape / download 间抖动
-    task.set_phase('stream')
-    session = DownloadSession(platform, task, target=target,
-                              media_label=platform.media_label)
-    scrape_result = {}
-    scrape_error = ''
-    login_error = ''
+    # ---------------- 抓取 ----------------
+    task.set_phase('scrape')
+    result = platform.scrape(target, options,
+                             on_progress=task.push,
+                             should_stop=task.stop_flag.is_set)
+
+    if task.stop_flag.is_set() or result.get('cancelled'):
+        task.mark('cancelled', '抓取已取消')
+        return
+
+    # ---------------- 存储定位 ----------------
+    folder_name = safe_name(result.get('nickname') or '') or target
+    task.set_name(folder_name)
+
+    existed = store.blogger(platform.key, folder_name) is not None
+    blogger = store.ensure(platform.key, folder_name)
+    if not blogger:
+        task.mark('error', '博主目录不可用：{}'.format(folder_name))
+        return
+    # 登记主页链接，之后点「更新」就不用再粘贴
+    blogger.save_homepage(result.get('user_url') or '')
+
+    # ---------------- 下载组装 ----------------
+    task.set_phase('download')
+    # 登记本次任务目标：下载层只向 store 要路径，不再接收博主对象
+    store.activate(blogger)
     try:
-        try:
-            scrape_result = platform.scrape_stream(
-                target, options, session,
-                on_progress=task.push,
-                should_stop=task.stop_flag.is_set) or {}
-        except RuntimeError as error:
-            # 登录闸门超时等：平台抛带「未登录」的 RuntimeError
-            message = str(error)
-            scrape_error = message
-            if '未登录' in message:
-                login_error = message
-        except Exception as error:
-            scrape_error = '抓取失败：{}'.format(error)
+        stats = platform.assemble(result,
+                                  on_progress=task.push,
+                                  should_stop=task.stop_flag.is_set,
+                                  media_label=platform.media_label) or {}
     finally:
-        # 无论成败都清目标；close 幂等，未 meta 时也能安全调用
-        stats = session.close()
+        store.clear()
 
-    # 平台归一化阶段的未知类型统计并入会话汇总
-    unknown = dict(stats['unknown_types'])
-    for key, value in (scrape_result.get('unknown_types') or {}).items():
-        try:
-            unknown[key] = unknown.get(key, 0) + int(value)
-        except (TypeError, ValueError):
-            pass
-    stats['unknown_types'] = unknown
+    # 平台一条都没挑出来：撤掉可能刚建的空目录
+    if not stats.get('total'):
+        if not existed:
+            blogger.delete()
+        task.mark('error', '没有可下载内容：可能未登录、没有公开作品、已全部下载过，'
+                           '或超出所选时间范围')
+        return
 
-    if scrape_result.get('error'):
-        message = str(scrape_result['error'])
-        scrape_error = scrape_error or message
-        if '未登录' in message:
-            login_error = login_error or message
-
-    # ---------------- 收口：状态与进度只有这一个出口 ----------------
-    # 身份失败 / 登录超时都会置 stop_flag，语义却是 error，必须先于取消判定；
-    # 用户取消由平台回报 cancelled 且置位 stop_flag，这里两者都认。
-    cancelled = bool(scrape_result.get('cancelled')) or task.stop_flag.is_set()
-    candidates = stats['candidates']
-    files = stats['files']
-    failed = stats['failed_files']
-
-    if session.meta_error:
-        status, message = 'error', session.meta_error
-    elif login_error:
-        status, message = 'error', login_error
-    elif cancelled:
-        status, message = 'cancelled', '任务已取消'
-    elif scrape_error:
-        status, message = 'error', scrape_error
-    elif not session.meta_ok:
-        status, message = 'error', '身份信息不可用，已中止，未下载任何内容'
-    elif candidates == 0:
-        status, message = 'error', (
-            '没有可下载内容：可能未登录、没有公开作品、已全部下载过，'
-            '或超出所选时间范围')
-    elif not stats['downloaded'] and stats['skipped_known'] == candidates:
-        status, message = 'done', '已全部下载过，无需重复下载'
-    elif not files and failed:
-        status, message = 'error', '全部下载失败：失败 {} 个文件'.format(failed)
-    else:
-        status, message = 'done', '任务完成，共处理 {} 篇、{} 个文件'.format(
-            candidates, files)
-
-    # 会话 / 平台可能已 mark 过终态，不重复写日志
-    if task.status == 'running':
-        task.mark(status, message)
-    task.push({'stage': 'finished',
-               'done': files,
-               'total': files + failed,
-               'failures': session.failures,
-               'unknown_types': unknown,
-               'processed': stats['processed'],
-               'stopped': status == 'cancelled'})
+    if task.stop_flag.is_set():
+        task.mark('cancelled', '任务已取消')
+    elif task.is_running():
+        task.mark('done')
 
 
 def mark_downloaded(platform, users):

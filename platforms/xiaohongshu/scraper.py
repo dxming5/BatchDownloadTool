@@ -24,8 +24,6 @@ from core.utils import safe_name
 
 LIST_MARK = '/api/sns/web/v1/user_posted'   # 主页笔记列表
 FEED_MARK = '/api/sns/web/v1/feed'          # 笔记详情
-# 用户资料类响应：只从这里取身份，绝不从笔记/详情的作者字段取
-PROFILE_MARKS = ('/api/sns/web/v1/user/', '/api/sns/web/v2/user/')
 
 LOGIN_COOKIE_NAMES = ('web_session',)
 LOGIN_MODAL_SELECTOR = ('.login-container, .login-modal, .login-btn,'
@@ -95,113 +93,6 @@ NOTE_STATE_JS = """
   try { return JSON.parse(JSON.stringify(note)); } catch (error) { return null; }
 }
 """
-
-
-# 身份只从页面级数据取，不遍历笔记作者：页面状态 → 昵称 DOM → 页面标题
-PROFILE_NICKNAME_JS = """
-() => {
-  const state = window.__INITIAL_STATE__;
-  const user = (state && state.user) || {};
-  const unwrap = (value) => {
-    if (value && typeof value === 'object' && value.__v_isRef) return value._value;
-    return value;
-  };
-  const bags = [unwrap(user.userPageData), unwrap(user.userPage),
-                unwrap(user.userInfo), unwrap(user.user), unwrap(user)];
-  for (const bag of bags) {
-    if (!bag || typeof bag !== 'object') continue;
-    const basic = unwrap(bag.basicInfo) || unwrap(bag.basic_info) || {};
-    const name = basic.nickname || basic.nickName ||
-                 bag.nickname || bag.nickName || bag.name;
-    if (name) return String(name).trim();
-  }
-  return '';
-}
-"""
-
-DOM_NICKNAME_JS = """
-() => {
-  const selectors = ['.user-name', '.nickname', '.username',
-                     '.user-info .name', '.user-detail .name',
-                     '[class*="nickname"]', '[class*="userName"]'];
-  for (const selector of selectors) {
-    const node = document.querySelector(selector);
-    if (!node) continue;
-    const text = (node.innerText || node.textContent || '').trim();
-    if (text) return text;
-  }
-  return '';
-}
-"""
-
-
-# 标题兜底常见的是站点名而不是博主名，拿它当身份会建错目录
-GENERIC_NICKNAMES = ('小红书', '小红书 - 小红书')
-
-
-def profile_nickname(page):
-    """从页面自身取博主昵称：页面状态 → 昵称 DOM → 标题按 ' - ' 截断"""
-    for script in (PROFILE_NICKNAME_JS, DOM_NICKNAME_JS):
-        try:
-            value = (page.evaluate(script) or '').strip()
-        except Exception:
-            value = ''
-        value = safe_name(value)
-        if value and value not in GENERIC_NICKNAMES:
-            return value
-    try:
-        value = safe_name(page.title().split(' - ')[0].strip())
-    except Exception:
-        value = ''
-    return value if value and value not in GENERIC_NICKNAMES else ''
-
-
-def profile_nickname_from_responses(responses, blogger_id='', on_message=None):
-    """从登录后的用户资料响应取昵称；只认用户资料响应，不碰笔记/详情作者"""
-    def emit(message):
-        if on_message:
-            try:
-                on_message(message)
-            except Exception:
-                pass
-
-    def walk(node, depth=0):
-        if depth > 6 or not isinstance(node, dict):
-            return ''
-        name = node.get('nickname') or node.get('nickName') or node.get('name')
-        if name and isinstance(name, str):
-            ids = [str(node.get(key) or '') for key in
-                   ('userId', 'user_id', 'id', 'redId', 'red_id')]
-            # 没有目标 ID 时只认明确带 user 字段的对象，避免误取其它实体
-            if blogger_id:
-                matched = any(blogger_id == value for value in ids)
-            else:
-                matched = any(node.get(key) for key in ('userId', 'user_id'))
-            if matched:
-                return safe_name(name)
-        for key in ('user', 'userInfo', 'basicInfo', 'basic_info',
-                    'userPageData', 'userPage', 'data'):
-            found = walk(node.get(key), depth + 1)
-            if found:
-                return found
-        return ''
-
-    for response in responses or []:
-        url = getattr(response, 'url', '')
-        # /user/me 是当前登录账号，不是目标博主，直接忽略
-        if '/user/me' in url:
-            continue
-        try:
-            payload = browser.response_json(response)
-        except Exception:
-            continue
-        value = walk(payload)
-        if value and value not in GENERIC_NICKNAMES:
-            emit('身份资料响应：{} → {}'.format(
-                getattr(response, 'url', ''), value))
-            return value
-        emit('身份资料响应未取到昵称：{}'.format(getattr(response, 'url', '')))
-    return ''
 
 
 # ---------------- 字段读取 ----------------
@@ -373,97 +264,79 @@ def open_detail(context, note, timeout_ms):
     return None
 
 
-def fill_details(context, notes, options, on_article=None, should_stop=None,
-                 verbose=False, skip_ids=None, on_message=None):
+def fill_details(context, notes, options, on_progress=None, should_stop=None,
+                 verbose=False, skip_ids=None):
     """
-    流式取详情：列表数据只用于发现笔记，详情到手立即交出，不保存全量列表
+    逐条取详情：列表数据只用于发现笔记，下载一律用详情
 
     没有 xsec_token 或详情打不开的笔记直接丢弃，不拿列表数据凑数；
     已经下载过的（skip_ids 命中）连详情页都不打开。
 
-    Args:
-        on_article: 每取到一条详情立即回调 on_article(detail)；返回 False 叫停
-
     Returns:
-        dict: {'found': 本批条数, 'filled': 取到条数, 'known': 已下载跳过条数,
-               'skipped': 丢弃条数, 'stopped': 是否被回调叫停/取消}
+        tuple: (details, stats)
+            details: 详情数据列表
+            stats:   {'found': 发现条数, 'filled': 取到条数,
+                      'known': 已下载跳过条数, 'skipped': 丢弃条数}
     """
     skip_ids = set(skip_ids or ())
     timeout_ms = max(2000, int(options.get('timeout_ms') or 30000))
 
     targets = list(notes)
-    stats = {'found': len(targets), 'filled': 0, 'known': 0,
-             'skipped': 0, 'stopped': False}
 
     def emit(message):
         if verbose:
             print('  ' + message)
-        if on_message:
+        if on_progress:
             try:
-                on_message(message)
+                on_progress({'stage': 'scrape', 'message': message})
             except Exception:
                 pass
 
+    details = []
+    known = 0
     for index, note in enumerate(targets, 1):
         if should_stop and should_stop():
-            stats['stopped'] = True
             break
 
         note_id = note_id_of(note)
         if not note_id or not has_token(note):
-            stats['skipped'] += 1
             continue
         if str(note_id) in skip_ids:
-            stats['known'] += 1
-            # 不打开详情页，但仍回调一次让会话计入「已下载跳过」，
-            # 否则「全部已下载」会因为没有候选条目被误判成无内容
-            if on_article and on_article({'note_id': note_id, '_known': True}) is False:
-                stats['stopped'] = True
-                break
+            known += 1
             continue
         emit('取详情 {}/{}…'.format(index, len(targets)))
         detail = open_detail(context, note, timeout_ms)
         if not detail:
-            stats['skipped'] += 1
             continue
 
         detail = dict(detail)
         # 详情偶尔不带 ID：只补标识，不动内容字段
         if not note_id_of(detail):
             detail['note_id'] = note_id
-        stats['filled'] += 1
-        if on_article and on_article(detail) is False:
-            stats['stopped'] = True
-            break
+        details.append(detail)
 
-    return stats
+    return details, {'found': len(targets), 'filled': len(details), 'known': known,
+                     'skipped': len(targets) - len(details) - known}
 
 
 def fetch_user_notes(target, options=None, since_ts=None,
                      on_progress=None, should_stop=None, known_ids=None,
-                     on_meta=None, on_article=None, verbose=False):
+                     verbose=False):
     """
-    流式抓取某博主的主页笔记
-
-    顺序固定：打开主页只等 DOM 就绪 → 登录闸门 → 强制刷新并清空登录前数据 →
-    挂监听、读 SSR、取页面身份并上报 meta → 首屏与滚动发现笔记，每发现一批就
-    逐条取详情立即交给 on_article，不保存全量详情列表。
+    抓取某博主的主页笔记
 
     Args:
         target:       主页链接（建议带 xsec_token）
         options:      抓取参数（profile_dir / headless / wait_login / max_scroll /
                       idle_rounds / timeout_ms / browser_channel / proxy）
         since_ts:     只保留发布时间 >= since_ts 的笔记
-        on_progress:  进度/日志回调
+        on_progress:  进度回调
         should_stop:  取消检查函数
-        known_ids:    平台反查到的已下载笔记 ID（不打开详情页）
-        on_meta:      on_meta(nickname, blogger_id, user_url) -> dict
-                      返回 {'known_ids': set, 'ok': bool}；必须早于 on_article
-        on_article:   on_article(detail) -> bool，返回 False 表示停止
         verbose:      是否打印到控制台
 
     Returns:
-        dict: pages / count / cancelled / stop_reason / unknown_types / details
+        dict: user_id / user_url / nickname / pages / notes / has_more /
+              restricted / cancelled / details / fetch_time
     """
     from playwright.sync_api import sync_playwright
 
@@ -481,19 +354,12 @@ def fetch_user_notes(target, options=None, since_ts=None,
 
     pages = []
     pending = []
-    profile_pending = []    # 登录后的用户资料响应，用来取身份
-    queue = []              # 待取详情的小队列，详情到手即出队
+    notes = []
     seen_ids = set()
     state = {'has_more': 1, 'cursor': ''}
     page_index = 0
     stale_run = 0
     early_stop = False
-    skip_ids = set(known_ids or ())
-    detail_stats = {'found': 0, 'filled': 0, 'known': 0, 'skipped': 0}
-    stop_reason = 'max_scroll'
-    nickname = ''
-    stopped = False
-    meta_ok = False
 
     def log(text):
         if verbose:
@@ -506,16 +372,11 @@ def fetch_user_notes(target, options=None, since_ts=None,
             except Exception:
                 pass
 
-    def note(message):
-        if verbose:
-            print('  ' + message)
-        emit({'stage': 'scrape', 'message': message})
-
     def cancelled():
         return bool(should_stop and should_stop())
 
     def accept(note):
-        """发现一条笔记：去重 + 时间过滤后入小队；返回是否新增"""
+        """入库一条笔记；返回是否新增（按 since_ts 过滤并驱动早停）"""
         nonlocal stale_run, early_stop
         note_id = note_id_of(note)
         if not note_id or note_id in seen_ids:
@@ -528,19 +389,15 @@ def fetch_user_notes(target, options=None, since_ts=None,
             return False
         stale_run = 0
         seen_ids.add(note_id)
-        queue.append(note)
+        notes.append(note)
         return True
 
     def on_response(response):
-        if response.status != 200:
-            return
-        if any(mark in response.url for mark in PROFILE_MARKS):
-            profile_pending.append(response)
-        elif LIST_MARK in response.url:
+        if LIST_MARK in response.url and response.status == 200:
             pending.append(response)
 
     def drain():
-        """把已捕获的列表响应解析入小队（此刻还没到取详情阶段）"""
+        """把已捕获的列表响应解析入队"""
         nonlocal page_index
         while pending:
             response = pending.pop(0)
@@ -554,40 +411,28 @@ def fetch_user_notes(target, options=None, since_ts=None,
             state['has_more'] = data.get('has_more', state['has_more'])
             state['cursor'] = data.get('cursor', state['cursor'])
 
+            added = 0
             for note in raw_notes:
-                if isinstance(note, dict):
-                    accept(note)
+                if isinstance(note, dict) and accept(note):
+                    added += 1
 
             page_index += 1
             message = '第 {} 页：本页 {} 条，累计 {} 条，has_more={}'.format(
-                page_index, len(raw_notes), len(seen_ids), data.get('has_more'))
+                page_index, len(raw_notes), len(notes), data.get('has_more'))
             log(message)
             emit({'stage': 'scrape', 'pages': page_index,
-                  'count': len(seen_ids), 'message': message})
+                  'count': len(notes), 'message': message})
 
             if payload.get('success') is False:
                 log('接口返回失败：code={} msg={}'.format(
                     payload.get('code'), payload.get('msg')))
 
-    def process_queue():
-        """把发现的一批笔记逐条取详情并立即交出；返回是否被叫停"""
-        nonlocal stopped, stop_reason
-        if not queue:
-            return False
-        batch = queue[:]
-        del queue[:]
-        stats = fill_details(context, batch, options,
-                             on_article=on_article,
-                             should_stop=should_stop,
-                             skip_ids=skip_ids, verbose=verbose,
-                             on_message=note)
-        for key in ('found', 'filled', 'known', 'skipped'):
-            detail_stats[key] += stats[key]
-        if stats['stopped']:
-            stopped = True
-            stop_reason = '下载已停止'
-            return True
-        return False
+    stop_reason = 'max_scroll'
+    restricted = False
+    nickname = ''
+    stopped = False
+    detail_notes = []
+    detail_stats = {'found': 0, 'filled': 0, 'known': 0, 'skipped': 0}
 
     emit({'stage': 'scrape', 'pages': 0, 'count': 0, 'message': '正在启动浏览器…'})
 
@@ -597,35 +442,12 @@ def fetch_user_notes(target, options=None, since_ts=None,
             channel=channel, proxy=proxy)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-
-            # 1. goto 只等 DOM 就绪：登录前不挂监听、不读状态、不发数据请求
+            page.on('response', on_response)
             page.goto(user_url, wait_until='domcontentloaded', timeout=timeout_ms)
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
-                  'message': '已打开主页，等待登录态…'})
+                  'message': '已打开主页，等待笔记列表…'})
 
-            # 2. 登录闸门：未登录/超时一律中止，不下载任何内容
-            logged_in = browser.ensure_logged_in(
-                page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR,
-                wait_login, should_stop, on_progress,
-                required_label='web_session')
-            if not logged_in:
-                raise RuntimeError(
-                    '未登录 小红书：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(
-                        profile_dir))
-
-            # 3. 登录成功后强制刷新，丢弃登录前可能累积的一切。
-            #    监听必须在刷新之前挂：刷新过程发出的列表响应同样是登录后数据，
-            #    刷新之后再挂会把首屏接口响应全部漏掉，表现为「0 条作品」。
-            pending[:] = []
-            profile_pending[:] = []
-            pages[:] = []
-            del queue[:]
-            seen_ids.clear()
-            page.on('response', on_response)
-            page.reload(wait_until='domcontentloaded', timeout=timeout_ms)
-            note('已登录，刷新页面后重新获取')
-
-            # 4. 刷新后读 SSR、取身份并上报 meta
+            # 首屏：页面状态下发，不发列表请求；状态是增量填充的，稍等再读一次取更全
             first_page = read_ssr_notes(page)
             if not first_page:
                 waited = 0
@@ -640,102 +462,127 @@ def fetch_user_notes(target, options=None, since_ts=None,
             if len(later) > len(first_page):
                 first_page = later
 
-            # 刷新过程捕获的列表响应先解析，避免等到第一次滚动才处理
-            drain()
-            note('刷新后：页面状态 {} 条，列表响应 {} 页，累计发现 {} 条'.format(
-                len(first_page), page_index, len(seen_ids)))
+            for note in first_page:
+                accept(note)
+            if first_page:
+                emit({'stage': 'scrape', 'pages': 0, 'count': len(notes),
+                      'message': '首屏 {} 条，累计 {} 条'.format(len(first_page), len(notes))})
 
-            blogger_id, _user_url = parse_user_id(target)
-            # 用户资料响应可能比 DOM 晚到，短暂等待后优先从响应里取昵称
+            # 等分页接口；期间可人工登录、过滑块
             waited = 0
-            while not profile_pending and waited < 5000:
+            while not pages and waited < wait_login * 1000:
                 if cancelled():
+                    stop_reason = '用户取消'
+                    stopped = True
                     break
-                page.wait_for_timeout(500)
-                waited += 500
-            response_nickname = profile_nickname_from_responses(
-                profile_pending, blogger_id, note)
-            nickname = response_nickname or profile_nickname(page)
-            note('博主昵称来源：{}'.format(
-                '用户资料响应' if response_nickname else '页面状态/DOM/标题'))
-            if on_meta:
-                info = on_meta(nickname, blogger_id, user_url) or {}
-                meta_ok = bool(info.get('ok'))
-                # 平台传入的 known_ids 与会话返回的 known_ids 取并集
-                skip_ids |= set(info.get('known_ids') or ())
-            else:
-                meta_ok = bool(nickname)
+                page.wait_for_timeout(1000)
+                waited += 1000
+                drain()
+                if waited % 15000 == 0:
+                    logged, modal = browser.login_state(
+                        page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
+                    log('已等待 {} 秒：登录态={}{}'.format(
+                        waited // 1000, '已登录' if logged else '未登录',
+                        '，页面有登录入口' if modal else ''))
 
-            if not meta_ok:
-                stop_reason = '身份信息不完整'
-                stopped = True
-            else:
-                for item in first_page:
-                    accept(item)
-                if first_page:
-                    note('首屏 {} 条，累计 {} 条'.format(
-                        len(first_page), len(seen_ids)))
-                if not process_queue():
-                    # 5. 滚动翻页与详情交替推进，不保存全量详情
-                    last_total = len(seen_ids)
-                    idle = 0
-                    for _index in range(max_scroll):
+            logged, modal = browser.login_state(
+                page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
+            if not logged or modal:
+                logged_in = browser.wait_for_login(
+                    page, wait_login, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR,
+                    should_stop=should_stop, on_progress=on_progress,
+                    verbose=verbose, required_label='web_session')
+                restricted = not logged_in
+                if logged_in:
+                    # 登录后重新拉一次，避免匿名态只给首屏
+                    page.reload(wait_until='domcontentloaded')
+                    waited = 0
+                    before = len(pages)
+                    while len(pages) == before and waited < 15000:
                         if cancelled():
-                            stop_reason = '用户取消'
-                            stopped = True
                             break
-                        if early_stop:
-                            stop_reason = '已到时间范围边界'
-                            break
-                        if state['has_more'] == 0:
-                            stop_reason = 'has_more=0'
-                            break
-                        scroll_info = browser.scroll_step(page, LIST_SELECTORS)
-                        page.wait_for_timeout(1200)
+                        page.wait_for_timeout(1000)
+                        waited += 1000
                         drain()
-                        if process_queue():
-                            break
-                        if len(seen_ids) > last_total:
-                            last_total = len(seen_ids)
-                            idle = 0
-                        else:
-                            idle += 1
-                            if idle % 2 == 0:
-                                note('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个）'.format(
-                                    idle, (scroll_info or {}).get('targets', 0),
-                                    (scroll_info or {}).get('moved', 0)))
-                            if idle >= idle_rounds:
-                                stop_reason = '连续 {} 次无新增'.format(idle)
-                                break
-                    else:
-                        stop_reason = '达到 max_scroll 上限'
+            if not notes and not pages and not stopped:
+                raise RuntimeError(
+                    '未抓取到任何笔记：可能未登录、登录已失效、xsec_token 已过期，'
+                    '或该主页没有公开笔记（请在浏览器窗口确认后重试）')
+
+            # 滚动翻页
+            last_total = len(notes)
+            idle = 0
+            for _index in range(max_scroll):
+                if cancelled():
+                    stop_reason = '用户取消'
+                    stopped = True
+                    break
+                if early_stop:
+                    stop_reason = '已到时间范围边界'
+                    break
+                if state['has_more'] == 0:
+                    stop_reason = 'has_more=0'
+                    break
+                info = browser.scroll_step(page, LIST_SELECTORS)
+                page.wait_for_timeout(1200)
+                drain()
+                if len(notes) > last_total:
+                    last_total = len(notes)
+                    idle = 0
+                else:
+                    idle += 1
+                    if idle % 2 == 0:
+                        log('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个）'.format(
+                            idle, (info or {}).get('targets', 0), (info or {}).get('moved', 0)))
+                    if idle >= idle_rounds:
+                        stop_reason = '连续 {} 次无新增'.format(idle)
+                        break
+            else:
+                stop_reason = '达到 max_scroll 上限'
+
+            # 列表只用于发现条目，逐条取详情，下载一律用详情数据
+            if notes and not stopped:
+                detail_notes, detail_stats = fill_details(
+                    context, notes, options,
+                    on_progress=on_progress,
+                    should_stop=should_stop,
+                    skip_ids=known_ids,
+                    verbose=verbose)
+
+            for note in detail_notes:
+                nickname = author_of(note)
+                if nickname:
+                    break
+            if not nickname:
+                try:
+                    nickname = page.title().split(' - ')[0].strip()
+                except Exception:
+                    nickname = ''
         finally:
             try:
                 context.close()
             except Exception:
                 pass
 
-    summary = '抓取结束：{}（发现 {} 条，取到详情 {} 条）'.format(
-        stop_reason, detail_stats['found'], detail_stats['filled'])
-    log(summary)
-    note(summary)
+    log('抓取结束：{}（{} 条，取到详情 {} 条）'.format(
+        stop_reason, len(detail_notes), detail_stats['filled']))
     if detail_stats['known']:
         log('已下载跳过：{} 条（未打开详情页）'.format(detail_stats['known']))
     if detail_stats['skipped']:
         log('详情未取到：丢弃 {} 条（无 xsec_token 或详情打不开）'.format(
             detail_stats['skipped']))
-    emit({'stage': 'scrape_done', 'pages': page_index, 'count': len(seen_ids),
-          'message': '抓取结束：{}，共 {} 条'.format(stop_reason, len(seen_ids))})
+    emit({'stage': 'scrape_done', 'pages': page_index, 'count': len(detail_notes),
+          'message': '抓取结束：{}，共 {} 条'.format(stop_reason, len(detail_notes))})
 
     return {
         'user_id': user_id,
         'user_url': user_url,
         'nickname': nickname,
-        'pages': page_index,
-        'count': len(seen_ids),
+        'pages': pages,
+        'notes': detail_notes,
+        'has_more': state.get('has_more'),
+        'restricted': restricted,
         'cancelled': stopped,
-        'stop_reason': stop_reason,
-        'unknown_types': {},
         'details': detail_stats,
         'since_ts': since_ts,
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),

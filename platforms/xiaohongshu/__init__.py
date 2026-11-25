@@ -3,8 +3,6 @@
 
 from conf import settings
 from core import store
-from core.session import identity
-from core.utils import safe_name
 from platforms.base import Platform
 from platforms.xiaohongshu import assemble, scraper
 
@@ -39,52 +37,17 @@ class XiaohongshuPlatform(Platform):
 
     # ---------------- 抓取 ----------------
 
-    def scrape_stream(self, target, options, session, on_progress=None,
-                      should_stop=None):
-        """
-        流式抓取 + 下载：登录闸门后冻结身份，详情到手逐篇交给会话
-
-        on_meta 只上报一次，返回的 known_ids 由采集器与平台反查的
-        known_ids 取并集；on_article 负责归一化后立即调 session.article。
-        """
-        frozen = {'nickname': ''}
-
-        def on_meta(nickname, blogger_id, user_url):
-            # 身份数据只在 core.session 里构造一次，平台只交原始三元组
-            result = session.meta(identity(self, nickname, blogger_id, user_url))
-            try:
-                frozen['nickname'] = (session.identity or {}).get('nickname', '') or ''
-            except Exception:
-                frozen['nickname'] = safe_name(nickname or '')
-            return result
-
-        def on_article(note):
-            if note.get('_known'):
-                # 已下载笔记不打开详情，只把 ID 交回会话计入 skipped_known
-                return session.article({'id': str(note.get('note_id') or '')})
-            article = assemble.normalize(note, frozen['nickname'])
-            if article is None:
-                return True     # 不属于目标博主 / 无法归一化：丢弃，继续
-            return session.article(article)
-
-        result = scraper.fetch_user_notes(
+    def scrape(self, target, options, on_progress=None, should_stop=None):
+        # 已经下载过的笔记不再打开详情页：这里只有小红书自己关心这件事
+        return scraper.fetch_user_notes(
             target,
             options=options,
             since_ts=options.get('since_ts'),
             on_progress=on_progress,
             should_stop=should_stop,
             known_ids=self.known_ids(target),
-            on_meta=on_meta,
-            on_article=on_article,
             verbose=False,
         )
-        return {
-            'pages': result.get('pages', 0),
-            'count': result.get('count', 0),
-            'cancelled': result.get('cancelled', False),
-            'stop_reason': result.get('stop_reason', ''),
-            'unknown_types': result.get('unknown_types', {}),
-        }
 
     def known_ids(self, target):
         """按主页链接反查已有目录，取出已下载的笔记 ID；找不到返回空集"""
@@ -98,6 +61,15 @@ class XiaohongshuPlatform(Platform):
         return set()
 
     # ---------------- 下载组装 ----------------
+
+    def assemble(self, result, on_progress=None, should_stop=None,
+                 media_label=''):
+        return assemble.run(
+            result,
+            on_progress=on_progress,
+            should_stop=should_stop,
+            media_label=media_label or self.media_label,
+        )
 
     def headers(self):
         return assemble.headers()

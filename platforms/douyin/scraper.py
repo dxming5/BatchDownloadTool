@@ -6,10 +6,8 @@
 监听 /aweme/v1/web/aweme/post/ 的响应体拿到原始 JSON，
 滚动到底部触发翻页，直到接口返回 has_more = 0 为止。
 
-通用浏览器能力（启动上下文、滚动、登录闸门）由 core.browser 提供。
-作品归一化在 assemble.py，逐篇下载由 core.session 负责。
-登录之前不挂响应监听、不读页面状态、不发数据请求；登录后强制刷新页面，
-再取身份并逐页交出作品（不保存全量列表）。
+通用浏览器能力（启动上下文、滚动、登录等待）由 core.browser 提供。
+作品类型判定、取址与下载组装在 assemble.py。
 """
 
 import json
@@ -34,50 +32,6 @@ LOGIN_COOKIE_NAMES = ('sessionid', 'sessionid_ss', 'sid_tt')
 
 LOGIN_MODAL_SELECTOR = ('[data-e2e="login-modal"], [data-e2e="login-panel"],'
                         ' .login-mask, #login-panel-new')
-
-# 主页昵称来源一：页面状态里的用户对象（不遍历作品列表里的 author）
-PAGE_USER_JS = """
-() => {
-  const roots = [window._ROUTER_DATA, window.__INITIAL_STATE__, window.RENDER_DATA];
-  const pick = (obj, depth) => {
-    if (!obj || typeof obj !== 'object' || depth > 4) return '';
-    for (const key of ['user', 'userInfo', 'owner', 'blogger']) {
-      const node = obj[key];
-      if (!node || typeof node !== 'object') continue;
-      const name = node.nickname || node.nick_name || node.name;
-      if (typeof name === 'string' && name.trim()) return name.trim();
-      const nested = pick(node, depth + 1);
-      if (nested) return nested;
-    }
-    return '';
-  };
-  for (const root of roots) {
-    if (!root || typeof root !== 'object') continue;
-    const name = pick(root.loaderData || root, 0) || pick(root, 0);
-    if (name) return name;
-  }
-  return '';
-}
-"""
-
-# 主页昵称来源二：昵称 DOM 节点
-PAGE_NICKNAME_JS = """
-() => {
-  const sels = [
-    '[data-e2e="user-info"] h1',
-    '[data-e2e="user-nickname"]',
-    '[data-e2e="user-name"]',
-    '.user-info h1',
-    'h1[data-e2e="user-info"]',
-  ];
-  for (const sel of sels) {
-    const node = document.querySelector(sel);
-    const text = node && (node.innerText || node.textContent || '').trim();
-    if (text) return text;
-  }
-  return '';
-}
-"""
 
 # 抓取范围早停阈值：连续这么多条作品都早于截止时间，就不再往下翻
 DEFAULT_STALE_LIMIT = 12
@@ -231,45 +185,22 @@ def parse_sec_user_id(raw):
     raise ValueError('无法从内容中识别 sec_user_id：{}'.format(raw[:80]))
 
 
-def page_nickname(page):
-    """从页面级数据取主页昵称：状态用户对象 → 昵称 DOM → 页面标题"""
-    for script in (PAGE_USER_JS, PAGE_NICKNAME_JS):
-        try:
-            value = (page.evaluate(script) or '').strip()
-        except Exception:
-            value = ''
-        if value:
-            return value
-    try:
-        return (page.title() or '').replace(' - 抖音', '').strip()
-    except Exception:
-        return ''
-
-
 def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
-                      on_meta=None, on_article=None,
                       on_progress=None, should_stop=None, verbose=False):
     """
-    流式抓取某博主的主页作品
-
-    登录闸门通过后才挂响应监听、取身份并翻页；每页逐条通过 on_article
-    交出，不保存全量列表。on_meta 必须在任何 on_article 之前调用，
-    on_article 返回 False（下载端要求停止）时立即停止翻页。
+    抓取某博主的主页作品
 
     Args:
         sec_user_id:  博主 sec_user_id
         options:      平台抓取参数（profile_dir / headless / wait_login /
                       max_scroll / idle_rounds / timeout_ms / browser_channel / proxy）
         since_ts:     只保留 create_time >= since_ts 的作品；连续若干条早于它时提前停止
-        on_meta:      (nickname, blogger_id, user_url) -> {'ok': bool, ...}，先于条目调用
-        on_article:   单条原始作品回调，返回 False 表示停止翻页
         on_progress:  进度回调
         should_stop:  取消检查函数，返回 True 时尽快结束（保留已抓部分）
         verbose:      是否打印到控制台
 
     Returns:
-        dict: 含 nickname / blogger_id / user_url / meta_ok / pages / count /
-              stop_reason / cancelled 等，不再返回全量 aweme_list
+        dict: 见返回值里的键（nickname / user_url / pages / aweme_list ...）
     """
     from playwright.sync_api import sync_playwright
 
@@ -283,21 +214,16 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     proxy = options.get('proxy')
     wait_login = max(0, int(options.get('wait_login') or 0))
     stale_limit = max(1, int(options.get('stale_limit') or DEFAULT_STALE_LIMIT))
-    first_page_wait = 20000
 
     user_url = 'https://www.douyin.com/user/{}'.format(sec_user_id)
-    blogger_id = parse_sec_user_id(sec_user_id)
+    pages = []
     pending = []
+    awemes = []
     seen_ids = set()
     last_page = {'has_more': 1}
-    nickname = ''
     page_index = 0
-    count = 0
     stale_run = 0
     early_stop = False
-    stopped = False
-    meta_ok = True
-    stop_reason = 'max_scroll'
 
     def log(text):
         if verbose:
@@ -320,8 +246,8 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             pending.append(response)
 
     def drain():
-        """逐页解析响应并逐条交出作品，不保存全量列表"""
-        nonlocal last_page, page_index, count, stale_run, early_stop, stopped, stop_reason
+        """把已抓到的响应解析入队，并按 since_ts 过滤与判断早停"""
+        nonlocal last_page, page_index, stale_run, early_stop
         while pending:
             response = pending.pop(0)
             payload = browser.response_json(response)
@@ -329,10 +255,8 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                 continue
 
             raw_list = payload.get('aweme_list') or []
-            keep_going = True
+            kept = []
             for aweme in raw_list:
-                if not isinstance(aweme, dict):
-                    continue
                 create_time = aweme.get('create_time') or 0
                 if since_ts and create_time and create_time < since_ts:
                     stale_run += 1
@@ -345,25 +269,30 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                     continue
                 if aweme_id:
                     seen_ids.add(aweme_id)
-                if on_article:
-                    keep_going = on_article(aweme)
-                    if keep_going is False:
-                        stopped = True
-                        stop_reason = '用户取消' if cancelled() else '下载端要求停止'
-                        break
-                count += 1
+                kept.append(aweme)
 
-            last_page = payload
+            awemes.extend(kept)
+            if kept or not since_ts:
+                if since_ts:
+                    # 只把范围内的作品留在分页数据里，避免下游解析到过期作品
+                    page_payload = dict(payload)
+                    page_payload['aweme_list'] = kept
+                    pages.append(page_payload)
+                else:
+                    pages.append(payload)
             page_index += 1
+            last_page = payload
+
             message = '第 {} 页：本页 {} 条，累计 {} 条，has_more={}'.format(
-                page_index, len(raw_list), count, payload.get('has_more'))
+                page_index, len(raw_list), len(awemes), payload.get('has_more'))
             log(message)
             emit({'stage': 'scrape', 'pages': page_index,
-                  'count': count, 'message': message})
-            if not keep_going:
-                pending.clear()
-                break
+                  'count': len(awemes), 'message': message})
 
+    stop_reason = 'max_scroll'
+    restricted = False
+    nickname = ''
+    stopped = False
     emit({'stage': 'scrape', 'pages': 0, 'count': 0, 'message': '正在启动浏览器…'})
 
     with sync_playwright() as playwright:
@@ -372,104 +301,128 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             channel=channel, proxy=proxy)
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            # 只等 DOM 就绪：登录前不挂响应监听、不读页面状态、不发数据请求
-            page.goto(user_url, wait_until='domcontentloaded', timeout=timeout_ms)
-
-            logged_in = browser.ensure_logged_in(
-                page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR,
-                wait_login, should_stop, on_progress)
-            if not logged_in:
-                raise RuntimeError(
-                    '未登录 抖音：请在浏览器窗口完成登录后重试（登录态保存在 {}）'.format(profile_dir))
-
-            # 登录成功：强制刷新，丢弃登录前可能拿到的任何数据
-            page.reload(wait_until='domcontentloaded')
-            emit({'stage': 'scrape', 'pages': 0, 'count': 0,
-                  'message': '已登录，刷新页面后重新获取…'})
-
-            # 刷新之后才挂响应监听、读页面状态、等首屏
             page.on('response', on_response)
-            nickname = page_nickname(page)
-            if on_meta:
-                meta = on_meta(nickname, blogger_id, user_url) or {}
-                meta_ok = bool(meta.get('ok'))
-            else:
-                meta_ok = False
+            page.goto(user_url, wait_until='domcontentloaded', timeout=timeout_ms)
+            emit({'stage': 'scrape', 'pages': 0, 'count': 0,
+                  'message': '已打开主页，等待作品列表…'})
 
-            if not meta_ok:
-                stop_reason = '身份信息不可用，未下载任何作品'
-                log(stop_reason)
-            else:
-                log('身份已冻结：{}（{}）'.format(nickname, blogger_id))
-
-                # 等首屏接口数据（登录刷新之后）
-                waited = 0
-                while page_index == 0 and waited < first_page_wait:
-                    if cancelled():
-                        stop_reason = '用户取消'
-                        stopped = True
-                        break
-                    page.wait_for_timeout(1000)
-                    waited += 1000
-                    drain()
-
-                if not stopped:
-                    # 滚动翻页，直到 has_more=0、时间边界、连续无新增或被取消
-                    last_total = count
-                    idle = 0
-                    for _index in range(max_scroll):
-                        if cancelled():
-                            stop_reason = '用户取消'
-                            stopped = True
-                            break
-                        if early_stop:
-                            stop_reason = '已到时间范围边界'
-                            break
-                        if last_page.get('has_more') == 0:
-                            stop_reason = 'has_more=0'
-                            break
-                        info = browser.scroll_step(page, LIST_SELECTORS)
-                        page.wait_for_timeout(1000)
-                        drain()
-                        if stopped:
-                            break
-                        if count > last_total:
-                            last_total = count
-                            idle = 0
-                        else:
-                            idle += 1
-                            if idle % 3 == 0:
-                                log('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个）'.format(
-                                    idle, (info or {}).get('targets', 0),
-                                    (info or {}).get('moved', 0)))
-                            if idle >= idle_rounds:
-                                stop_reason = '连续 {} 次无新增'.format(idle)
-                                break
+            # 等待首屏接口数据；期间可人工登录、拖滑块
+            waited = 0
+            while not pages and waited < wait_login * 1000:
+                if cancelled():
+                    stop_reason = '用户取消'
+                    stopped = True
+                    break
+                page.wait_for_timeout(1000)
+                waited += 1000
+                drain()
+                if waited % 10000 == 0:
+                    logged, modal = browser.login_state(
+                        page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
+                    if modal or not logged:
+                        log('已等待 {} 秒：检测到未登录（{}），请在浏览器窗口完成登录'.format(
+                            waited // 1000, '登录弹窗已出现' if modal else '无 sessionid'))
                     else:
-                        stop_reason = '达到 max_scroll 上限'
-                    if not stopped and not early_stop and last_page.get('has_more') == 0:
-                        stop_reason = 'has_more=0（已到最后一页）'
+                        log('已等待 {} 秒：已登录，继续等待接口返回'.format(waited // 1000))
+
+            if not pages and not stopped:
+                raise RuntimeError(
+                    '未捕获到 {} 的响应：请确认已登录、已通过验证，或该主页确实无作品'.format(API_MARK))
+
+            # 匿名态抖音只给首屏一页：先等人工登录，再开始翻页
+            logged_in = True
+            if not stopped and last_page.get('has_more') != 0 and not early_stop:
+                # 已登录就不重载：reload 会让首屏被重复请求一次
+                already_logged, _ = browser.login_state(
+                    page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
+                if already_logged:
+                    log('已登录，跳过首屏重载')
+                else:
+                    logged_in = browser.wait_for_login(
+                        page, wait_login, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR,
+                        should_stop=should_stop, on_progress=on_progress,
+                        verbose=verbose, required_label='sessionid')
+                    if logged_in and not cancelled():
+                        # 刚登录：重新加载主页，让列表按已登录身份重新拉取
+                        before = len(pages)
+                        page.reload(wait_until='domcontentloaded')
+                        waited = 0
+                        while len(pages) == before and waited < 20000:
+                            if cancelled():
+                                break
+                            page.wait_for_timeout(1000)
+                            waited += 1000
+                            drain()
+
+            # 滚动翻页，直到 has_more=0、到达时间边界、连续无新增或被取消
+            last_total = len(awemes)
+            idle = 0
+            for _index in range(max_scroll):
+                if cancelled():
+                    stop_reason = '用户取消'
+                    stopped = True
+                    break
+                if early_stop:
+                    stop_reason = '已到时间范围边界'
+                    break
+                if last_page.get('has_more') == 0:
+                    stop_reason = 'has_more=0'
+                    break
+                info = browser.scroll_step(page, LIST_SELECTORS)
+                page.wait_for_timeout(1000)
+                drain()
+                if len(awemes) > last_total:
+                    last_total = len(awemes)
+                    idle = 0
+                else:
+                    idle += 1
+                    if idle % 3 == 0:
+                        log('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个）'.format(
+                            idle, (info or {}).get('targets', 0), (info or {}).get('moved', 0)))
+                    if idle >= idle_rounds:
+                        stop_reason = '连续 {} 次无新增'.format(idle)
+                        break
+            else:
+                stop_reason = '达到 max_scroll 上限'
+            if not stopped and not early_stop and last_page.get('has_more') == 0:
+                stop_reason = 'has_more=0（已到最后一页）'
+
+            nickname = ''
+            for aweme in awemes:
+                nickname = (aweme.get('author') or {}).get('nickname') or ''
+                if nickname:
+                    break
+            if not nickname:
+                try:
+                    nickname = page.title().replace(' - 抖音', '').strip()
+                except Exception:
+                    nickname = ''
+
+            logged, modal = browser.login_state(
+                page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
+            restricted = (not logged_in) or (not logged) or modal
         finally:
             try:
                 context.close()
             except Exception:
                 pass
 
-    log('抓取结束：{}（{} 条）'.format(stop_reason, count))
-    emit({'stage': 'scrape_done', 'pages': page_index, 'count': count,
-          'message': '抓取结束：{}，共 {} 条'.format(stop_reason, count)})
+    log('抓取结束：{}（{} 条）'.format(stop_reason, len(awemes)))
+    if restricted and last_page.get('has_more') != 0:
+        log('提示：当前未登录，抖音只放出首屏约一页作品；'
+            '请在浏览器窗口扫码登录后重试（登录态保存在 {}）'.format(profile_dir))
+    emit({'stage': 'scrape_done', 'pages': page_index, 'count': len(awemes),
+          'message': '抓取结束：{}，共 {} 条'.format(stop_reason, len(awemes))})
 
     return {
         'sec_user_id': sec_user_id,
         'user_url': user_url,
         'nickname': nickname,
-        'blogger_id': blogger_id,
-        'meta_ok': meta_ok,
-        'pages': page_index,
-        'count': count,
+        'pages': pages,
+        'aweme_list': awemes,
         'has_more': last_page.get('has_more'),
-        'stop_reason': stop_reason,
-        'cancelled': cancelled(),
+        'restricted': restricted,
+        'cancelled': stopped,
         'since_ts': since_ts,
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
