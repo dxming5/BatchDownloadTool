@@ -92,6 +92,8 @@ _PLATFORM_DEFAULTS = {
     'wait_login_seconds': '180',
     'max_scroll': '400',
     'idle_rounds': '8',
+    'page_wait_seconds': '2.0',
+    'page_load_timeout': '30',
     'month_days': '30',
     'browser_channel': '',
     'proxy': '',
@@ -129,9 +131,9 @@ def platform_settings(key):
 
     Returns:
         dict: profile_dir / headless / wait_login / max_scroll / idle_rounds /
-              month_days / browser_channel / proxy / timeout_ms /
-              following_max_scroll / following_limit / following_interval /
-              image_types / video_types / referer / accept
+              page_wait / page_load_timeout / month_days / browser_channel /
+              proxy / timeout_ms / following_max_scroll / following_limit /
+              following_interval / image_types / video_types / referer / accept
     """
     section = _platform_section(key)
     fallback = _PLATFORM_DEFAULTS
@@ -175,6 +177,8 @@ def platform_settings(key):
         'wait_login': number('wait_login_seconds', 0),
         'max_scroll': number('max_scroll', 1),
         'idle_rounds': number('idle_rounds', 1),
+        'page_wait': decimal('page_wait_seconds', 0.5),
+        'page_load_timeout': decimal('page_load_timeout', 5.0),
         'month_days': number('month_days', 1),
         'browser_channel': raw('browser_channel') or None,
         'proxy': raw('proxy') or None,

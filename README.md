@@ -196,6 +196,7 @@ python web_app.py
 - 匿名态抖音只放出首屏约一页，因此抓到首屏后如果未登录会先等扫码，登录成功后重新加载主页再翻页
 - 类型判定按 `aweme_type`（`image_types` / `video_types` 可配）；图片取每张 `url_list` 的第一个地址，视频取 `play_addr.url_list` 的第一个（同一文件的其余地址是备用 CDN，不能都下）
 - 采集时按 `aweme_id` 去重，滚动容器逐层推进；连续 `idle_rounds` 次无新增即停止
+- 判断「没有下一页」只看接口的 `has_more`。滚动后如果目标接口还有请求在飞、或页面还显示加载骨架，会一直等（每次翻页最多 `page_load_timeout` 秒）且不计入「无新增」，避免弱网、风控验证把还在一半的抓取提前判死；结束时 `has_more` 仍非 0 会明确提示「可能未抓全」，不会当成正常抓完
 - **关注列表**：不手工构造请求，打开 `https://www.douyin.com/user/self?showTab=following` 后监听 `/aweme/v1/web/user/following/list/` 的响应体，滚动触发翻页；接口一直没响应时退化为扫描页面上的用户链接
 
 ## 小红书说明
@@ -259,7 +260,9 @@ python web_app.py
 | `profile_dir` | 空 | 浏览器数据目录，留空 = `项目根/.pw_profile/<平台 key>` |
 | `wait_login_seconds` | `180` | 未登录时等待扫码的秒数，`0` 表示不等待 |
 | `max_scroll` | `400` | 最大滚动次数（微博按翻页次数使用） |
-| `idle_rounds` | `8` | 连续多少次滚动无新增就停止 |
+| `idle_rounds` | `8` | 连续多少次滚动无新增就停止；只统计「接口没有请求在飞、页面也没有加载态」的轮次 |
+| `page_wait_seconds` | `2.0` | 滚动后等新数据的基础窗口（秒），覆盖「滚动 → 抖音发请求」的延迟 |
+| `page_load_timeout` | `30` | 单次翻页最长等待（秒）：接口还在返回、页面还在骨架屏时可一直等，上限即此值 |
 | `month_days` | `30` | 「最近一个月」对应的天数 |
 | `following_max_scroll` | `200` | 关注列表最多翻多少页，防止接口异常时死循环 |
 | `following_limit` | `0` | 关注列表最多取多少人，`0` 表示不限 |
@@ -412,6 +415,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | 微博图片全部下载失败（403） | 把 `[platforms.weibo] referer` 改成 `https://weibo.com/` |
 | 下载到一半被限流、大量失败 | 把 `[download] workers` 调小（`1` 即逐个下载） |
 | 抓取条数明显偏少 | 确认已登录；适当调大 `max_scroll`；微博会按翻页上限提前结束并提示 |
+| 日志提示「has_more 仍为 1 / 可能未抓全」 | 页面加载太慢被空闲判定提前结束：调大 `idle_rounds` 或 `page_load_timeout` 后重试 |
 | 提示「没有可下载内容」 | 已全部下载过、未登录、所选时间范围内无作品，或该主页没有公开作品 |
 | 博主列表看不到某个目录 | 博主需位于 `{download_dir}/{平台 key}/` 下，且含 `author.json`、`video/` 或 `picture/` |
 | 「更新」提示缺少记录文件 | 目录里没有 `author.json`：重新粘贴一次主页链接抓取即可生成 |

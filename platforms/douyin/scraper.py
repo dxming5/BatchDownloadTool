@@ -28,6 +28,19 @@ LIST_SELECTORS = (
     '[data-e2e="scroll-list"]',
 )
 
+# 列表加载态（骨架屏 / 转圈）：命中说明抖音还在拉数据，不能当成「没有下一页」
+LOADING_JS = """
+() => {
+  const nodes = document.querySelectorAll(
+    '[data-e2e="loading"], [class*="skeleton"], [class*="loading-spin"]');
+  for (const node of nodes) {
+    const rect = node.getBoundingClientRect();
+    if (rect.width && rect.height) return true;
+  }
+  return false;
+}
+"""
+
 # 只要能读到这些 Cookie 之一，就说明浏览器里已有登录态
 # （sessionid 是 HttpOnly，document.cookie 读不到，必须走 context.cookies()）
 LOGIN_COOKIE_NAMES = ('sessionid', 'sessionid_ss', 'sid_tt')
@@ -218,6 +231,8 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     proxy = options.get('proxy')
     wait_login = max(0, int(options.get('wait_login') or 0))
     stale_limit = max(1, int(options.get('stale_limit') or DEFAULT_STALE_LIMIT))
+    page_wait = max(0.5, float(options.get('page_wait') or 2.0))
+    page_cap = max(page_wait, float(options.get('page_load_timeout') or 30))
 
     user_url = 'https://www.douyin.com/user/{}'.format(sec_user_id)
     pages = []
@@ -230,6 +245,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     page_index = 0
     stale_run = 0
     early_stop = False
+    inflight = {'count': 0}     # 目标接口的在途请求数：区分「加载中」与「没有下一页」
 
     def log(text):
         if verbose:
@@ -272,6 +288,15 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             pending.append(response)
         elif USER_PROFILE_MARK in response.url:
             profile_pending.append(response)
+
+    def on_request(request):
+        """目标接口的请求进入在途状态；翻页时据此认出「还在加载」而不是「没数据」"""
+        if API_MARK in (request.url or ''):
+            inflight['count'] += 1
+
+    def on_request_done(request):
+        if API_MARK in (request.url or '') and inflight['count'] > 0:
+            inflight['count'] -= 1
 
     def is_target_author(candidate):
         """该用户对象是否就是目标博主
@@ -349,6 +374,57 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             emit({'stage': 'scrape', 'pages': page_index,
                   'count': len(awemes), 'message': message})
 
+    def page_loading():
+        """列表是否还在加载（骨架屏 / 转圈）"""
+        try:
+            return bool(page.evaluate(LOADING_JS))
+        except Exception:
+            return False
+
+    def settle():
+        """等这一屏之后的下一页数据：短轮询，见到新作品立刻返回
+
+        抖音慢的时候（弱网、风控验证、签名计算）一页能拖十几秒。原来固定等
+        1 秒再数一次「无新增」，正好把这十几秒算成「没有下一页」，于是日志里
+        出现「连续 8 次无新增」就结束了。现在只要目标接口还有请求在飞、或页面
+        还显示加载态，就一直等（最多 page_cap 秒），这期间不计空闲轮次。
+
+        Returns:
+            int: 本次新增的作品条数
+        """
+        started = time.time()
+        base = len(awemes)
+        deadline = started + page_wait          # 基础窗口：覆盖「滚动 → 发请求」的延迟
+        hard_deadline = started + page_cap      # 上限：请求一直不回来也不能无限等
+        nudged = False
+        while True:
+            page.wait_for_timeout(200)
+            drain()
+            drain_profile()
+            added = len(awemes) - base
+            if added:
+                return added
+            now = time.time()
+            if now >= hard_deadline:
+                return 0
+            if inflight['count'] > 0:
+                deadline = now + 1.0            # 请求在飞：续一小段，直到硬上限
+                continue
+            if now < deadline:
+                continue
+            if page_loading() and now < started + page_wait * 2:
+                # 骨架屏还在（但没有请求在飞）：只多等一小段。
+                # DOM 加载态不如在途请求可靠，不拿它撑满整个 page_cap
+                deadline = now + 0.5
+                continue
+            if not nudged:
+                # 滚到位却没触发请求：再抖一下，懒加载观察器有时需要新事件
+                nudged = True
+                browser.scroll_step(page, LIST_SELECTORS)
+                deadline = now + 1.5
+                continue
+            return 0
+
     stop_reason = 'max_scroll'
     restricted = False
     nickname = ''
@@ -362,6 +438,9 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.on('response', on_response)
+            page.on('request', on_request)
+            page.on('requestfinished', on_request_done)
+            page.on('requestfailed', on_request_done)
             page.goto(user_url, wait_until='domcontentloaded', timeout=timeout_ms)
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
                   'message': '已打开主页，等待作品列表…'})
@@ -424,8 +503,8 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                             drain()
                             drain_profile()
 
-            # 滚动翻页，直到 has_more=0、到达时间边界、连续无新增或被取消
-            last_total = len(awemes)
+            # 滚动翻页，直到 has_more=0、到达时间边界、连续无新增或被取消；
+            # 「无新增」只统计接口不忙、页面也不在加载的轮次，慢网不会被误杀
             idle = 0
             for _index in range(max_scroll):
                 if cancelled():
@@ -439,17 +518,16 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                     stop_reason = 'has_more=0'
                     break
                 info = browser.scroll_step(page, LIST_SELECTORS)
-                page.wait_for_timeout(1000)
-                drain()
-                drain_profile()
-                if len(awemes) > last_total:
-                    last_total = len(awemes)
+                if settle():
                     idle = 0
                 else:
                     idle += 1
                     if idle % 3 == 0:
-                        log('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个）'.format(
-                            idle, (info or {}).get('targets', 0), (info or {}).get('moved', 0)))
+                        log('连续 {} 次无新增（滚动容器 {} 个，位移 {} 个，'
+                            'has_more={}）'.format(
+                                idle, (info or {}).get('targets', 0),
+                                (info or {}).get('moved', 0),
+                                last_page.get('has_more')))
                     if idle >= idle_rounds:
                         stop_reason = '连续 {} 次无新增'.format(idle)
                         break
@@ -483,9 +561,23 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                 pass
 
     log('抓取结束：{}（{} 条）'.format(stop_reason, len(awemes)))
+    # has_more 还是 1 就停了：要么未登录被限制，要么加载超时没抓全；
+    # 两种情况都不算「已抓全」，明确提示，避免把残缺结果当成完整
+    incomplete = (not stopped and not early_stop
+                  and last_page.get('has_more') not in (0, False))
     if restricted and last_page.get('has_more') != 0:
-        log('提示：当前未登录，抖音只放出首屏约一页作品；'
-            '请在浏览器窗口扫码登录后重试（登录态保存在 {}）'.format(profile_dir))
+        notice = ('当前未登录，抖音只放出首屏约一页作品；'
+                  '请在浏览器窗口扫码登录后重试（登录态保存在 {}）'.format(profile_dir))
+    elif incomplete:
+        notice = ('has_more 仍为 {}（{}），本次可能未抓全；'
+                  '可重试，或调大 idle_rounds / page_load_timeout'.format(
+                      last_page.get('has_more'), stop_reason))
+    else:
+        notice = ''
+    if notice:
+        log('提示：' + notice)
+        # 用 notice 上报：verbose 关闭时控制台不打印，界面日志仍能看到
+        emit({'stage': 'notice', 'message': '提示：' + notice})
     emit({'stage': 'scrape_done', 'pages': page_index, 'count': len(awemes),
           'message': '抓取结束：{}，共 {} 条'.format(stop_reason, len(awemes))})
 
@@ -500,6 +592,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
         'aweme_list': awemes,
         'has_more': last_page.get('has_more'),
         'restricted': restricted,
+        'incomplete': incomplete,
         'cancelled': stopped,
         'since_ts': since_ts,
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -580,6 +673,7 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
     channel = options.get('browser_channel')
     proxy = options.get('proxy')
     wait_login = max(0, int(options.get('wait_login') or 0))
+    page_cap = max(2.0, float(options.get('page_load_timeout') or 30))
 
     users = []
     seen = set()
@@ -592,6 +686,7 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
     api_seen = []          # 诊断用：本次任务见过的接口路径（去重、限量）
     following_hits = 0     # 诊断用：命中「关注列表」接口的次数
     expected = 0           # 页面上显示的关注数，用于核对抓取结果
+    inflight = {'count': 0}  # 关注列表接口的在途请求数：加载中不算「无新增」
 
     def log(text):
         if verbose:
@@ -624,6 +719,15 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
             return
         if USER_INFO_MARK in url and response.status == 200:
             info_pending.append(response)
+
+    def on_request(request):
+        """关注列表接口的请求进入在途状态；加载中不算「没有更多」"""
+        if FOLLOWING_HINT in (request.url or ''):
+            inflight['count'] += 1
+
+    def on_request_done(request):
+        if FOLLOWING_HINT in (request.url or '') and inflight['count'] > 0:
+            inflight['count'] -= 1
 
     def drain_info():
         """从用户信息接口取当前登录账号昵称"""
@@ -733,6 +837,9 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
         try:
             page = context.pages[0] if context.pages else context.new_page()
             page.on('response', on_response)
+            page.on('request', on_request)
+            page.on('requestfinished', on_request_done)
+            page.on('requestfailed', on_request_done)
             page.goto(SELF_URL, wait_until='domcontentloaded', timeout=timeout_ms)
 
             # 关注列表只有登录后才可见：先确保登录，再进关注页
@@ -794,6 +901,9 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
                     page = context.pages[-1]
                     try:
                         page.on('response', on_response)
+                        page.on('request', on_request)
+                        page.on('requestfinished', on_request_done)
+                        page.on('requestfailed', on_request_done)
                     except Exception:
                         pass
                     # 这个页面是点击直接打开的，整页内容就是列表，可全页采信
@@ -869,6 +979,15 @@ def fetch_following(options=None, on_progress=None, should_stop=None, verbose=Fa
                     page.wait_for_timeout(int(max(0.2, interval) * 1000))
                     drain()
                     drain_info()
+                    # 接口还在飞：这是在加载，不是「没有更多」；等这一次回来再判断
+                    waited = 0
+                    while inflight['count'] > 0 and waited < page_cap * 1000:
+                        page.wait_for_timeout(500)
+                        waited += 500
+                        drain()
+                        drain_info()
+                        if len(users) > last_total:
+                            break
                     if len(users) > last_total:
                         last_total = len(users)
                         idle = 0
