@@ -9,7 +9,7 @@
     └── <平台 key>/
         └── <昵称> uid=<uid>/     目录名带 uid，重名与改名都不影响定位
             ├── author.json   uid、昵称、主页链接与粉丝数
-            ├── aweme_id.txt   已下载篇 ID
+            ├── downloaded_ids.txt 已下载篇 ID
             ├── video/         视频
             │   └── .preview/  视频预览图（取首帧封面）
             └── picture/       图片
@@ -34,7 +34,7 @@ from core.utils import make_dir, safe_name
 
 RECORD_NAME = 'author.json'          # 博主记录文件：uid / 昵称 / 主页链接 / 粉丝数
 UID_SEP = ' uid='                    # 目录名里的 uid 分隔：<昵称> uid=<uid>
-ID_RECORD_NAME = 'aweme_id.txt'      # 保留原名，避免已有下载记录失效
+ID_RECORD_NAME = 'downloaded_ids.txt'   # 已下载篇 ID：一行一个，三平台通用
 VIDEO_DIR_NAME = 'video'
 PICTURE_DIR_NAME = 'picture'
 PREVIEW_DIR_NAME = '.preview'        # 预览图子目录：video/ 与 picture/ 下同名
@@ -169,6 +169,7 @@ def preview_dir(key, name, is_video):
 
 
 def ids_path(key, name):
+    """ID 记录文件：<博主目录>/downloaded_ids.txt（一行一个篇 ID）"""
     return _child(key, name, ID_RECORD_NAME)
 
 

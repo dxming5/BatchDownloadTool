@@ -6,7 +6,7 @@
 不做任何路径运算：
 
     Blogger：持「平台 key + 目录名」，目录名形如 <昵称> uid=<uid>，记录文件
-        （author.json / aweme_id.txt）由它读写，位置一律问 core.paths；博主
+        （author.json / downloaded_ids.txt）由它读写，位置一律问 core.paths；博主
         改名时由 attach 按 uid 定位旧目录并原地重命名，不按新昵称另建目录；
     当前任务目标：编排层 activate、结束 clear，下载层与平台层据此向 store
         取博主名、ID 记录与落盘路径，彼此之间不再传递博主对象。
@@ -112,7 +112,7 @@ class Blogger(object):
 
         只用于「按 uid 定位到旧目录」后的改名：位置一律由「平台 key + 目录名」
         现算，改名后不需要再更新任何配置、链接或索引；author.json 与
-        aweme_id.txt、媒体、预览图都在目录内，随目录一起走。
+        downloaded_ids.txt、媒体、预览图都在目录内，随目录一起走。
 
         目标名被别的目录占用、名字不可用或系统调用失败时保持原样返回 False，
         不覆盖、不合并，也不留下第二份目录。成功后本对象指向新目录，并把
