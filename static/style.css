@@ -652,6 +652,18 @@ summary {
   white-space: nowrap;
 }
 
+/* 同平台重名时的 uid 徽标：只补充区分信息，不抢名字的视觉权重 */
+.blogger .uid {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--muted, #8b93a1);
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 5px;
+  font-variant-numeric: tabular-nums;
+}
+
 .blogger .actions {
   flex: 0 0 auto;
   margin-left: auto;

@@ -75,7 +75,13 @@ def collect(result):
     image_types = values.get('image_types') or ()
     video_types = values.get('video_types') or ()
 
-    expected = safe_name(result.get('nickname') or '')
+    # 昵称基准是本次任务已登记的目标博主（编排层已 activate）；抓取结果里的
+    # 昵称只作兜底，不能反过来盖掉目录名——一次任务只认一个昵称
+    current = store.current()
+    expected = safe_name((current.nickname if current else '')
+                         or result.get('nickname') or '')
+    target_uid = (result.get('sec_user_id') or result.get('user_id')
+                  or (current.uid if current else '')).strip()
 
     entries = []
     unknown = {}
@@ -93,12 +99,19 @@ def collect(result):
         if aweme_id in seen:
             continue
 
-        author = safe_name((aweme.get('author') or {}).get('nickname') or '')
+        author_obj = aweme.get('author') or {}
+        author = safe_name(author_obj.get('nickname') or '')
         if not author:
             continue
 
-        # 名字对不上：不是目标博主，丢弃；昵称取不到时放弃过滤
-        if expected and author != expected:
+        # sec_uid 是作者唯一标识，昵称可能抓错（改名 / 登录账号顶替）：
+        # 两边都有 sec_uid 就按标识判定，缺标识时才退回昵称比较
+        author_uid = (author_obj.get('sec_uid') or '').strip()
+        if target_uid and author_uid:
+            same_author = author_uid == target_uid
+        else:
+            same_author = not expected or author == expected
+        if not same_author:
             dropped[author] = dropped.get(author, 0) + 1
             continue
 

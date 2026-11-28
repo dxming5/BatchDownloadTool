@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-媒体响应与预览缓存
+媒体响应与预览图
 
-负责把下载目录里的文件按字节区间回给浏览器（支持拖动进度条），以及缩略图、
-视频封面的生成与缓存。缓存放在博主目录内、由 store 给出的缓存目录下，删除博主时随目录一起
-清掉，也不会混进博主的图片列表。
+负责把下载目录里的文件按字节区间回给浏览器（支持拖动进度条），以及预览图的
+生成与缓存。预览图与媒体文件放在一起：图片的缩略图在 `picture/.preview/`，
+视频的取帧封面在 `video/.preview/`；隐藏目录，删除博主时随目录一起清掉，
+也不会混进博主的媒体列表。
 
-缓存位置由博主对象给出，不从文件路径反推身份：调用方（路由 / 前端）自己
-知道当前是哪个平台、哪位博主。
+预览图位置由博主身份（平台 key + 博主名）与媒体类型给出，不从文件路径反推。
 """
 
 import hashlib
@@ -32,7 +32,7 @@ MEDIA_EXTS = IMAGE_EXTS + VIDEO_EXTS
 
 
 def _inner(blogger, target):
-    """媒体文件相对博主目录的路径，作为缓存 key 的一部分（由 store 计算）"""
+    """媒体文件相对博主目录的路径，作为预览图 key 的一部分（由 core.paths 计算）"""
     return paths.inner_path(blogger.key, blogger.name, target)
 
 
@@ -45,23 +45,22 @@ def _mtime(target):
 
 def cover_path(blogger, target, mtime=None):
     """
-    视频封面的缓存路径
+    视频预览图（取首帧封面）路径：<博主>/video/.preview/<hash>.jpg
 
     key 由「相对博主目录的路径 + 修改时间」决定：视频被重新下载或覆盖后 key
-    变化，旧封面自然失效。mtime 由调用方传入可省掉一次 stat。
+    变化，旧预览图自然失效。mtime 由调用方传入可省掉一次 stat。
     """
     stamp = '{}|{}'.format(_inner(blogger, target),
                            _mtime(target) if mtime is None else mtime)
     key = hashlib.md5(stamp.encode('utf-8')).hexdigest()
-    return paths.cover_file(blogger.key, blogger.name, key)
+    return paths.preview_file(blogger.key, blogger.name, True, key)
 
 
 def thumb_path(blogger, target, size):
     """
-    缩略图缓存路径：同一文件内容（路径 + 修改时间 + 尺寸）对应一个 key
+    图片缩略图路径：<博主>/picture/.preview/<hash>.jpg
 
-    修改时间必须取原始浮点值：历史缓存 key 就是按浮点算的，改成整数会让
-    已有缩略图全部失效、每次预览都重新解码原图。
+    key 由「路径 + 修改时间 + 尺寸」决定，同一张图不同尺寸各存一份。
     """
     try:
         mtime = os.path.getmtime(target)
@@ -69,11 +68,11 @@ def thumb_path(blogger, target, size):
         mtime = 0
     stamp = '{}|{}|{}'.format(_inner(blogger, target), mtime, size)
     key = hashlib.md5(stamp.encode('utf-8')).hexdigest()
-    return paths.thumb_file(blogger.key, blogger.name, key)
+    return paths.preview_file(blogger.key, blogger.name, False, key)
 
 
 def make_thumb(blogger, target, size):
-    """生成缩略图并缓存；已存在直接复用"""
+    """生成图片缩略图并写入预览目录；已存在直接复用"""
     from PIL import Image
 
     output = thumb_path(blogger, target, size)
@@ -88,7 +87,7 @@ def make_thumb(blogger, target, size):
 
 
 def media_response(platform_key, name, rel_path, thumb=None):
-    """媒体文件响应：图片可带 thumb 参数走缩略图缓存，其余按区间返回原文件"""
+    """媒体文件响应：图片可带 thumb 参数走缩略图，其余按区间返回原文件"""
     target = paths.resolve(rel_path)
     if not target:
         abort(404)

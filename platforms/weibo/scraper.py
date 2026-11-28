@@ -33,6 +33,9 @@ API = 'https://m.weibo.cn/api/container/getIndex'
 # 登录态接口：data.login 是微博自己给出的登录标志，比 Cookie 名可靠
 CONFIG_API = 'https://m.weibo.cn/api/config'
 
+# 用户资料容器前缀：100505 + uid 即「博主资料」，昵称与粉丝数在这里
+PROFILE_CONTAINER_PREFIX = '100505'
+
 # Cookie 兜底：SUB/SUBP 是登录票据名；_T_WM、XSRF-TOKEN 匿名访客也有，不能用来判断
 LOGIN_COOKIE_NAMES = ('SUB', 'SUBP')
 
@@ -127,7 +130,7 @@ def parse_uid(raw):
 
 
 def home_url(uid):
-    """规范化主页地址；写进 homepage.txt，「更新」时能被再次识别"""
+    """规范化主页地址；写进 author.json，「更新」时能被再次识别"""
     return 'https://m.weibo.cn/u/{}'.format(uid)
 
 
@@ -206,6 +209,25 @@ def _no_more_content(message):
     return any(keyword in text for keyword in NO_MORE_MESSAGES)
 
 
+def _int_value(value):
+    """计数类字段转整数：兼容 76000 与「7.6万」两种形式；非法返回 None"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    match = re.match(r'^([\d.]+)\s*([万亿]?)$',
+                     str(value or '').strip().replace(',', ''))
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2)
+    if unit == '万':
+        number *= 10000
+    elif unit == '亿':
+        number *= 100000000
+    return int(number)
+
+
 def request_json(context, url, timeout_ms, retries=None):
     """
     请求接口并返回 JSON
@@ -251,6 +273,29 @@ def request_json(context, url, timeout_ms, retries=None):
             time.sleep(random.uniform(1.0, 2.0))
 
     raise RuntimeError('微博接口请求失败：{}'.format(last_error or '未知异常'))
+
+
+def fetch_profile(context, uid, timeout_ms):
+    """
+    读取博主资料（getIndex 的 100505 用户资料容器）
+
+    与抓作品一样走真实浏览器上下文，Cookie 自动携带；接口失败不影响抓取，
+    调用方拿到空字典时只写链接、不写昵称与粉丝数。
+
+    Returns:
+        dict: userInfo 字段（screen_name / followers_count …）；取不到返回空字典
+    """
+    url = '{}?type=uid&value={}&containerid={}{}'.format(
+        API, uid, PROFILE_CONTAINER_PREFIX, uid)
+    try:
+        payload = request_json(context, url, timeout_ms, retries=0)
+    except RuntimeError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    data = payload.get('data') or {}
+    user = data.get('userInfo') or data.get('user') or {}
+    return user if isinstance(user, dict) else {}
 
 
 def api_login_state(context, timeout_ms):
@@ -380,7 +425,8 @@ def ensure_login(page, profile_dir, options, on_progress=None,
 
 
 def fetch_user_posts(target, options=None, since_ts=None,
-                     on_progress=None, should_stop=None, verbose=False):
+                     on_progress=None, should_stop=None, on_profile=None,
+                     verbose=False):
     """
     抓取某博主的微博列表（只收集带图片的原始 mblog 数据）
 
@@ -391,6 +437,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
         since_ts:     只保留发布时间 >= since_ts 的微博
         on_progress:  进度回调
         should_stop:  取消检查函数
+        on_profile:   主页信息回调：拿到博主资料就立即上报一次（不等抓完）
         verbose:      是否打印到控制台
 
     Returns:
@@ -419,6 +466,7 @@ def fetch_user_posts(target, options=None, since_ts=None,
     stopped = False
     restricted = False
     nickname = ''
+    profile = {}
     since_id = '0'
     page_index = 0
     has_more = False
@@ -436,6 +484,24 @@ def fetch_user_posts(target, options=None, since_ts=None,
 
     def cancelled():
         return bool(should_stop and should_stop())
+
+    profile_sent = {'done': False}
+
+    def notify_profile():
+        """主页信息一拿到就上报：编排层据此立即落盘记录文件，不必等抓取结束"""
+        if profile_sent['done'] or not on_profile:
+            return
+        nickname = (profile.get('screen_name') or '').strip()
+        if not nickname:
+            return
+        profile_sent['done'] = True
+        try:
+            on_profile({'nickname': nickname,
+                        'user_url': user_url,
+                        'user_id': uid,
+                        'follower_count': _int_value(profile.get('followers_count'))})
+        except Exception:
+            pass
 
     emit({'stage': 'scrape', 'pages': 0, 'count': 0, 'message': '正在启动浏览器…'})
 
@@ -467,6 +533,16 @@ def fetch_user_posts(target, options=None, since_ts=None,
                               timeout=timeout_ms)
                 except Exception:
                     log('重新打开主页失败，继续用接口抓取')
+
+            # 博主资料（昵称 / 粉丝数）：失败不影响抓作品
+            profile = fetch_profile(context, uid, timeout_ms)
+            if profile:
+                log('已读取博主资料：{}（粉丝 {}）'.format(
+                    profile.get('screen_name') or '-',
+                    profile.get('followers_count')))
+                notify_profile()
+            else:
+                log('未能读取博主资料接口，昵称与粉丝数将使用兜底值')
 
             while not stopped and page_index < page_limit:
                 if cancelled():
@@ -566,7 +642,9 @@ def fetch_user_posts(target, options=None, since_ts=None,
                     stopped = True
                     break
 
-            if mblogs and not nickname:
+            # 资料接口的昵称最准；没有时退回微博作者、页面标题
+            nickname = (profile.get('screen_name') or '').strip()
+            if not nickname and mblogs:
                 nickname = author_of(mblogs[0])
             if not nickname:
                 try:
@@ -593,8 +671,10 @@ def fetch_user_posts(target, options=None, since_ts=None,
 
     return {
         'uid': uid,
+        'user_id': uid,                  # 记录文件名：微博数字 uid
         'user_url': user_url,
         'nickname': nickname,
+        'follower_count': _int_value(profile.get('followers_count')),
         'pages': pages,
         'mblogs': mblogs,
         'has_more': has_more,

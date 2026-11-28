@@ -153,8 +153,8 @@ def create_app():
         """
         静态资源与媒体默认每次回源校验
 
-        缩略图与视频封面例外：前端请求 URL 都带 mtime 版本号（&v=xxx），
-        内容一变 URL 必变，因此可以按内容长期缓存。
+        预览图（缩略图与视频封面）例外：前端请求 URL 都带 mtime 版本号
+        （&v=xxx），内容一变 URL 必变，因此可以按内容长期缓存。
         """
         if not request.path.startswith(('/static/', '/api/media')):
             return response
@@ -164,7 +164,7 @@ def create_app():
             request.path == '/api/media'
             and response.status_code == 200
             and request.args.get('v')
-            and (request.args.get('thumb') or paths.is_cover(rel))
+            and (request.args.get('thumb') or paths.is_preview(rel))
         )
         if versioned:
             response.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
@@ -182,7 +182,7 @@ def create_app():
     def api_status():
         count = 0
         for platform in registry.all_platforms():
-            count += len(store.platform_bloggers(platform.key, VIDEO_EXTS))
+            count += len(store.platform_bloggers(platform.key))
         with _LOCK:
             active = _ACTIVE.snapshot() if _ACTIVE and _ACTIVE.is_running() else None
         return jsonify({
@@ -272,15 +272,20 @@ def create_app():
 
     @app.get('/api/bloggers')
     def api_bloggers():
-        """按平台分组返回博主列表"""
+        """按平台分组返回博主列表（重名时标 dup，前端用 uid 区分）"""
         groups = []
         total = 0
         for platform in registry.all_platforms():
-            bloggers = store.platform_bloggers(platform.key, VIDEO_EXTS)
+            bloggers = store.platform_bloggers(platform.key)
             if not bloggers:
                 continue
             items = [dict(blogger.item(), platform=platform.key)
                      for blogger in bloggers]
+            # 同一平台内昵称重复：标出来，前端补一个 uid 徽标
+            counts = collections.Counter(
+                (item['label'] or '').casefold() for item in items)
+            for item in items:
+                item['dup'] = counts[(item['label'] or '').casefold()] > 1
             total += len(items)
             groups.append({'platform': platform.key,
                            'label': platform.label,
@@ -299,10 +304,11 @@ def create_app():
                          '与 playwright install chromium 后重启服务'
             }), 503
 
-        home = blogger.read_homepage()
+        home = blogger.read_record()['url']
         if not home:
             return jsonify({
-                'error': '该博主目录缺少 homepage.txt，请重新粘贴主页链接抓取一次以登记'
+                'error': '该博主目录缺少记录文件（author.json），'
+                         '请重新粘贴主页链接抓取一次以登记'
             }), 400
 
         # 更新走全量抓取，已下载的作品由记录文件跳过
@@ -328,7 +334,7 @@ def create_app():
         items = []
         if blogger:
             ident = '&platform={}&name={}'.format(quote(platform_key), quote(name))
-            # 遍历规则（跳过缓存等隐藏目录）由 store 给出，路由层不复制布局
+            # 遍历规则（只走 video/、picture/，跳过 .preview 等隐藏目录）由 core.paths 给出
             for full in paths.media_files(blogger.key, blogger.name, MEDIA_EXTS):
                 try:
                     info = os.stat(full)
@@ -362,7 +368,7 @@ def create_app():
 
     @app.post('/api/covers')
     def api_cover_save():
-        """前端把取到的视频首帧回存到封面缓存目录，下次直接复用"""
+        """前端把取到的视频首帧回存到 video/.preview，下次直接复用"""
         payload = request.get_json(silent=True) or {}
         blogger = store.blogger((payload.get('platform') or '').strip(),
                                 (payload.get('name') or '').strip())

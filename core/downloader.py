@@ -5,9 +5,10 @@
 统一下载层：按篇接收地址、校验去重、拼文件名落盘、并发调度、进度统计都在这里，
 平台只负责挑条目、算发布时间、把 (篇 ID, 时间, [地址]) 交给 fetch_all。
 
-    fetch_media：把一个地址拉成本地文件——失败重试，失败时清掉半成品，
-       先落临时文件，完成后按响应头/文件头/URL 后缀定扩展名，落盘路径向
-       调用方给的路径来源要（本层不拼任何目录）；
+    fetch_media：把一个地址拉成本地文件——失败重试，失败时清掉半成品；
+       先按响应头/文件头/URL 后缀定格式，再向 store 要「与最终文件同目录」
+       的临时路径（视频 video/、图片 picture/），完成时改名为最终文件
+       （本层不拼任何目录）；
     fetch_all：按篇校验 done_ids（整篇跳过并计入进度），展开地址并发拉取，
        结果按完成顺序回传，落盘后处理（如 HEIC 转 JPG）在下载线程里执行，
        并按篇聚合记 ID（一篇全成功才记，满一批落盘一次）。
@@ -32,7 +33,7 @@ from core import store
 # 图片后缀：落盘进 store 的图片目录，同时作为媒体列表的白名单来源
 IMAGE_EXTS = ('jpg', 'png', 'webp', 'gif', 'avif', 'heic', 'heif',
               'bmp', 'tif', 'ico')
-# 视频后缀：落盘在路径来源给出的根目录
+# 视频后缀：落盘进 store 的视频目录，同时作为媒体列表的白名单来源
 VIDEO_EXTS = ('mp4', 'mov', 'm4v', 'webm', 'mkv', 'avi', 'flv', 'wmv',
               'ts', '3gp', 'mpg')
 
@@ -42,6 +43,9 @@ VIDEO_ALIASES = {'mpeg': 'mpg', 'mpe': 'mpg'}
 
 # 响应头、文件头、URL 后缀都识别不出时的兜底
 FALLBACK_EXT = 'webp'
+
+# 判定格式时从响应流里预读的字节数（够覆盖各格式的文件头特征）
+HEAD_SIZE = 256
 
 # 响应头 Content-Type → 扩展名
 EXT_BY_TYPE = {
@@ -84,13 +88,8 @@ def format_create_time(timestamp):
         return None
 
 
-def detect_media_ext(path):
-    """按文件头识别真实格式；识别不出返回空串"""
-    try:
-        with open(path, 'rb') as handle:
-            head = handle.read(256)
-    except OSError:
-        return ''
+def detect_ext(head):
+    """按文件头字节识别真实格式；识别不出返回空串"""
     if head[:3] == b'\xff\xd8\xff':
         return 'jpg'
     if head[:8] == b'\x89PNG\r\n\x1a\n':
@@ -167,44 +166,42 @@ def _cleanup(path):
 
 def fetch_media(url, create_time, index, headers, log=None):
     """
-    下载单个地址：先落 .part，完成后按响应头/文件头/URL 后缀定扩展名。
+    下载单个地址：先落 .part，完成后改名。
 
-    放哪由 store 决定（当前任务目标现算路径，含视频/图片分目录）；本层只判断
-    「这是视频还是图片」，不拼任何目录，也不接收任何路径参数。
-    log 可选，拿到响应头后打印「正在下载」日志，尽量显示最终文件名。
+    先按响应头 → 文件头 → URL 后缀判断格式，据此确定「这是视频还是图片」，
+    再向 store 要临时路径与最终路径：视频进 video/、图片进 picture/，临时文件
+    与最终文件同目录，完成时只是一次改名。本层不拼任何目录，也不接收路径参数。
+    log 可选，拿到响应头后打印「正在下载」日志。
 
     Returns:
-        tuple: (是否成功, 最终路径, 错误信息)
+        tuple: (是否成功, 最终路径（失败时为临时路径）, 错误信息)
     """
-    target = store.part_path(create_time, index)
-    content_type = ''
+    target = ''
     logged = False
     for attempt in range(settings.MAX_RETRY + 1):
         try:
             opener = _build_opener(headers)
-            with opener.open(url, timeout=settings.DOWNLOAD_TIMEOUT) as response, \
-                    open(target, 'wb') as handle:
+            with opener.open(url, timeout=settings.DOWNLOAD_TIMEOUT) as response:
                 content_type = response.headers.get_content_type() or ''
+                head = response.read(HEAD_SIZE)
+                ext = (ext_from_content_type(content_type)
+                       or detect_ext(head)
+                       or ext_from_url(url)
+                       or FALLBACK_EXT)
+                is_video = ext in VIDEO_EXTS
+                target = store.part_path(create_time, index, is_video)
+                final = store.media_path(create_time, index, ext, is_video)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
                 if log and not logged:
                     logged = True
-                    ext = ext_from_content_type(content_type) or ext_from_url(url)
-                    display = (store.media_path(create_time, index, ext,
-                                                  ext in VIDEO_EXTS)
-                               if ext else target)
                     try:
-                        log('正在下载 {}'.format(os.path.basename(display)))
+                        log('正在下载 {}'.format(os.path.basename(final)))
                     except Exception:
                         pass
-                shutil.copyfileobj(response, handle)
-            ext = (ext_from_content_type(content_type)
-                   or detect_media_ext(target)
-                   or ext_from_url(url)
-                   or FALLBACK_EXT)
-            final = store.media_path(create_time, index, ext, ext in VIDEO_EXTS)
+                with open(target, 'wb') as handle:
+                    handle.write(head)
+                    shutil.copyfileobj(response, handle)
             try:
-                parent = os.path.dirname(final)
-                if parent and not os.path.isdir(parent):
-                    os.makedirs(parent)
                 os.replace(target, final)
             except OSError:
                 _cleanup(target)
@@ -225,22 +222,25 @@ CANCELLED_ERROR = '已取消'
 
 def _fetch_one(item_id, url, create_time, index, headers,
                should_stop, finish, log=None):
-    """线程池里的单个任务：已取消就不再发起请求，成功后执行落盘后处理"""
-    target = store.part_path(create_time, index)
+    """线程池里的单个任务：已取消就不再发起请求，成功后执行落盘后处理
+
+    返回元组里的 target 只用于失败提示：类型要等响应头到了才知道，取消与
+    成功时没有临时文件可报，返回空串。
+    """
     if should_stop and should_stop():
-        return item_id, url, target, False, target, CANCELLED_ERROR
+        return item_id, url, '', False, '', CANCELLED_ERROR
 
     ok, final, error = fetch_media(url, create_time, index, headers, log)
     if not ok:
-        return item_id, url, target, False, final, error
+        return item_id, url, final, False, final, error
 
     if finish:
         try:
             final = finish(final) or final
         except Exception as exc:
             # 后处理失败不算下载失败：文件已落盘，只把原因带回去提示
-            return item_id, url, target, True, final, '落盘后处理失败：{}'.format(exc)
-    return item_id, url, target, True, final, ''
+            return item_id, url, '', True, final, '落盘后处理失败：{}'.format(exc)
+    return item_id, url, '', True, final, ''
 
 
 def fetch_all(jobs, headers=None, workers=1, should_stop=None,
@@ -392,11 +392,7 @@ def fetch_all(jobs, headers=None, workers=1, should_stop=None,
                     try:
                         result = future.result()
                     except Exception as exc:
-                        try:
-                            target = store.part_path(create_time, index)
-                        except Exception:
-                            target = ''
-                        result = (item_id, url, target, False, target,
+                        result = (item_id, url, '', False, '',
                                   '下载线程异常：{}'.format(exc))
                     settle()
                     aggregate(result)

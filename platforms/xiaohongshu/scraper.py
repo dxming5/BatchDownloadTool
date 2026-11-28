@@ -24,6 +24,7 @@ from core.utils import safe_name
 
 LIST_MARK = '/api/sns/web/v1/user_posted'   # 主页笔记列表
 FEED_MARK = '/api/sns/web/v1/feed'          # 笔记详情
+USER_INFO_MARK = '/api/sns/web/v1/user/otherinfo'   # 用户资料
 
 LOGIN_COOKIE_NAMES = ('web_session',)
 LOGIN_MODAL_SELECTOR = ('.login-container, .login-modal, .login-btn,'
@@ -91,6 +92,39 @@ NOTE_STATE_JS = """
   if (!entry) return null;
   const note = entry.note || entry;
   try { return JSON.parse(JSON.stringify(note)); } catch (error) { return null; }
+}
+"""
+
+# 用户资料也可能只存在于页面状态（首屏 SSR，不发 otherinfo 请求）
+USER_STATE_JS = """
+() => {
+  const state = window.__INITIAL_STATE__ || {};
+  const unwrap = (value) => (
+    value && typeof value === 'object' && value.__v_isRef ? value._value : value);
+  const userRoot = unwrap(state.user) || {};
+  const pageData = unwrap(userRoot.userPageData) || {};
+  let basic = unwrap(pageData.basicInfo) || {};
+  let interactions = unwrap(pageData.interactions) || [];
+  if (Array.isArray(interactions)) interactions = interactions.map(unwrap);
+
+  // 结构随版本变化：递归找一个带 nickname / red_id 的对象兜底
+  if (!basic.nickname) {
+    const seen = new Set();
+    const walk = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 6 || seen.has(node)) return null;
+      seen.add(node);
+      const current = unwrap(node);
+      if (!current || typeof current !== 'object') return null;
+      if (!Array.isArray(current) && (current.nickname || current.red_id)) return current;
+      for (const key of Object.keys(current)) {
+        const found = walk(unwrap(current[key]), depth + 1);
+        if (found) return found;
+      }
+      return null;
+    };
+    basic = walk(userRoot, 0) || basic;
+  }
+  return JSON.stringify({basic: basic, interactions: interactions});
 }
 """
 
@@ -164,6 +198,73 @@ def parse_user_id(raw):
         return raw, 'https://www.xiaohongshu.com/user/profile/' + raw
 
     raise ValueError('无法从内容中识别小红书 user_id：{}'.format(raw[:80]))
+
+
+def user_from_payload(payload):
+    """
+    从用户资料接口响应里取 basic_info 与 interactions
+
+    Returns:
+        tuple: (basic, interactions)；不是资料响应时返回 ({}, [])
+    """
+    if not isinstance(payload, dict):
+        return {}, []
+    data = payload.get('data')
+    if not isinstance(data, dict):
+        return {}, []
+    basic = data.get('basic_info') or data.get('basicInfo') or {}
+    interactions = data.get('interactions') or []
+    if not isinstance(basic, dict):
+        basic = {}
+    if not isinstance(interactions, list):
+        interactions = []
+    return basic, interactions
+
+
+def read_user_state(page):
+    """
+    读取页面状态里的用户资料（基础信息 + 互动计数）
+
+    Returns:
+        tuple: (basic, interactions)；取不到返回 ({}, [])
+    """
+    try:
+        raw = page.evaluate(USER_STATE_JS)
+    except Exception:
+        return {}, []
+    try:
+        data = json.loads(raw or '{}')
+    except ValueError:
+        return {}, []
+    basic = data.get('basic') if isinstance(data, dict) else None
+    interactions = data.get('interactions') if isinstance(data, dict) else None
+    return (basic if isinstance(basic, dict) else {},
+            interactions if isinstance(interactions, list) else [])
+
+
+def _count_value(value):
+    """把「1.2万」「3,456」这类计数文本或数字转成整数"""
+    match = re.match(r'\s*([\d.]+)\s*([万亿]?)', str(value or ''))
+    if not match:
+        return None
+    number = float(match.group(1))
+    unit = match.group(2)
+    if unit == '万':
+        number *= 10000
+    elif unit == '亿':
+        number *= 100000000
+    return int(number)
+
+
+def fans_count(interactions):
+    """interactions 里粉丝计数；没有返回 None"""
+    for item in interactions or ():
+        if not isinstance(item, dict):
+            continue
+        key = item.get('type') or item.get('name') or ''
+        if key in ('fans', '粉丝'):
+            return _count_value(item.get('count'))
+    return None
 
 
 def read_ssr_notes(page):
@@ -320,8 +421,8 @@ def fill_details(context, notes, options, on_progress=None, should_stop=None,
 
 
 def fetch_user_notes(target, options=None, since_ts=None,
-                     on_progress=None, should_stop=None, known_ids=None,
-                     verbose=False):
+                     on_progress=None, should_stop=None, on_profile=None,
+                     known_ids=None, verbose=False):
     """
     抓取某博主的主页笔记
 
@@ -332,6 +433,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
         since_ts:     只保留发布时间 >= since_ts 的笔记
         on_progress:  进度回调
         should_stop:  取消检查函数
+        on_profile:   主页信息回调：拿到博主资料就立即上报一次（不等抓完）
         verbose:      是否打印到控制台
 
     Returns:
@@ -354,6 +456,9 @@ def fetch_user_notes(target, options=None, since_ts=None,
 
     pages = []
     pending = []
+    profile_pending = []
+    profile_basic = {}
+    profile_interactions = []
     notes = []
     seen_ids = set()
     state = {'has_more': 1, 'cursor': ''}
@@ -375,6 +480,24 @@ def fetch_user_notes(target, options=None, since_ts=None,
     def cancelled():
         return bool(should_stop and should_stop())
 
+    profile_sent = {'done': False}
+
+    def notify_profile():
+        """主页信息一拿到就上报：编排层据此立即落盘记录文件，不必等抓取结束"""
+        if profile_sent['done'] or not on_profile:
+            return
+        nickname = (profile_basic.get('nickname') or '').strip()
+        if not nickname:
+            return
+        profile_sent['done'] = True
+        try:
+            on_profile({'nickname': nickname,
+                        'user_url': user_url,
+                        'user_id': user_id,
+                        'follower_count': fans_count(profile_interactions)})
+        except Exception:
+            pass
+
     def accept(note):
         """入库一条笔记；返回是否新增（按 since_ts 过滤并驱动早停）"""
         nonlocal stale_run, early_stop
@@ -393,8 +516,23 @@ def fetch_user_notes(target, options=None, since_ts=None,
         return True
 
     def on_response(response):
-        if LIST_MARK in response.url and response.status == 200:
+        if response.status != 200:
+            return
+        if LIST_MARK in response.url:
             pending.append(response)
+        elif USER_INFO_MARK in response.url:
+            profile_pending.append(response)
+
+    def drain_profile():
+        """解析用户资料接口：昵称、粉丝数"""
+        nonlocal profile_basic, profile_interactions
+        while profile_pending:
+            payload = browser.response_json(profile_pending.pop(0))
+            basic, interactions = user_from_payload(payload)
+            if basic.get('nickname'):
+                profile_basic = basic
+                profile_interactions = interactions
+        notify_profile()
 
     def drain():
         """把已捕获的列表响应解析入队"""
@@ -447,6 +585,17 @@ def fetch_user_notes(target, options=None, since_ts=None,
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
                   'message': '已打开主页，等待笔记列表…'})
 
+            # 用户资料接口与首屏数据通常同时到达：先短等一次，
+            # 即使 wait_login=0 也能拿到博主名与粉丝数
+            profile_waited = 0
+            while not profile_basic and profile_waited < 3000:
+                page.wait_for_timeout(500)
+                profile_waited += 500
+                drain_profile()
+            if not profile_basic:
+                profile_basic, profile_interactions = read_user_state(page)
+            notify_profile()
+
             # 首屏：页面状态下发，不发列表请求；状态是增量填充的，稍等再读一次取更全
             first_page = read_ssr_notes(page)
             if not first_page:
@@ -478,6 +627,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
                 page.wait_for_timeout(1000)
                 waited += 1000
                 drain()
+                drain_profile()
                 if waited % 15000 == 0:
                     logged, modal = browser.login_state(
                         page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
@@ -504,6 +654,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
                         page.wait_for_timeout(1000)
                         waited += 1000
                         drain()
+                        drain_profile()
             if not notes and not pages and not stopped:
                 raise RuntimeError(
                     '未抓取到任何笔记：可能未登录、登录已失效、xsec_token 已过期，'
@@ -526,6 +677,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
                 info = browser.scroll_step(page, LIST_SELECTORS)
                 page.wait_for_timeout(1200)
                 drain()
+                drain_profile()
                 if len(notes) > last_total:
                     last_total = len(notes)
                     idle = 0
@@ -549,10 +701,16 @@ def fetch_user_notes(target, options=None, since_ts=None,
                     skip_ids=known_ids,
                     verbose=verbose)
 
-            for note in detail_notes:
-                nickname = author_of(note)
-                if nickname:
-                    break
+            # 资料接口最准；没有时退回详情作者，最后用页面标题
+            if not profile_basic:
+                profile_basic, profile_interactions = read_user_state(page)
+            notify_profile()
+            nickname = (profile_basic.get('nickname') or '').strip()
+            if not nickname:
+                for note in detail_notes:
+                    nickname = author_of(note)
+                    if nickname:
+                        break
             if not nickname:
                 try:
                     nickname = page.title().split(' - ')[0].strip()
@@ -578,6 +736,7 @@ def fetch_user_notes(target, options=None, since_ts=None,
         'user_id': user_id,
         'user_url': user_url,
         'nickname': nickname,
+        'follower_count': fans_count(profile_interactions),
         'pages': pages,
         'notes': detail_notes,
         'has_more': state.get('has_more'),

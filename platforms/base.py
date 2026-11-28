@@ -19,7 +19,7 @@ class Platform(object):
         label          界面显示名
         match(url)     链接是否属于本平台
         parse_target   从链接取出目标标识
-        scrape         抓取并返回平台自定的结果结构
+        scrape         抓取并返回平台自定的结果结构（拿到主页信息即回调 on_profile）
         assemble       这批内容怎么下（挑条目、取地址、命名材料都由平台决定）
 
     可选：
@@ -28,7 +28,6 @@ class Platform(object):
         options()      该平台的抓取参数
         supports_following / following()
                        抓当前登录账号的关注列表（只出链接，不下载）
-        user_id_of()   从主页链接取账号标识，用于判断是否已有下载目录
     """
 
     key = ''
@@ -44,7 +43,14 @@ class Platform(object):
     def parse_target(self, url):
         raise NotImplementedError
 
-    def scrape(self, target, options, on_progress=None, should_stop=None):
+    def scrape(self, target, options, on_progress=None, should_stop=None,
+               on_profile=None):
+        """抓取主页内容
+
+        on_profile 在拿到主页信息（昵称 / 主页链接 / 用户 ID / 粉丝数）时
+        立刻回调一次，编排层据此马上登记记录文件，不必等抓取结束。
+        回调参数为 dict：{'nickname', 'user_url', 'user_id', 'follower_count'}。
+        """
         raise NotImplementedError
 
     def assemble(self, result, on_progress=None, should_stop=None,
@@ -71,10 +77,6 @@ class Platform(object):
     def options(self):
         """该平台的抓取参数（由配置段合并默认值）"""
         return settings.platform_settings(self.key)
-
-    def user_id_of(self, url):
-        """从主页链接里取账号标识；取不到返回空串（用于标注「已下载」）"""
-        return ''
 
     def following(self, options, on_progress=None, should_stop=None):
         """抓取「当前登录账号」的关注列表（只出链接，不下载任何内容）

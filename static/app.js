@@ -8,9 +8,10 @@
     taskId: null,
     polling: false,
     logLength: 0,
-    galleryName: '',
+    galleryName: '',       /* 目录名：接口定位用 */
     galleryPlatform: '',
-    galleryLabel: '',
+    galleryLabel: '',      /* 平台显示名 */
+    galleryDisplay: '',    /* 博主昵称：标题展示用 */
     galleryKind: 'image',
     galleryItems: [],      /* 当前博主的全部作品（图片 + 视频），切换标签复用 */
     galleryLoading: false,
@@ -653,31 +654,43 @@
   }
 
   function renderBloggerRow(platform, label, item) {
+    /* item.name 是目录名（接口定位用），item.label 才是昵称（展示用） */
+    var display = item.label || item.name;
     var row = document.createElement('div');
     row.className = 'blogger';
     row.dataset.name = item.name;
     row.dataset.platform = platform;
+    row.dataset.uid = item.uid || '';
     row.tabIndex = 0;
-    row.title = '点击预览「' + item.name + '」的作品（默认图片）';
+    row.title = '点击预览「' + display + '」的作品（默认图片）';
     if (state.galleryPlatform === platform && state.galleryName === item.name) {
       row.classList.add('active');
     }
-    row.addEventListener('click', function () { openGallery(platform, label, item.name); });
+    row.addEventListener('click', function () { openGallery(platform, label, item.name, display); });
     row.addEventListener('keydown', function (event) {
       /* 行内按钮的按键不触发浏览，避免回车删除时顺带打开预览 */
       if (event.target !== row) return;
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
-      openGallery(platform, label, item.name);
+      openGallery(platform, label, item.name, display);
     });
 
     var name = document.createElement('div');
     name.className = 'name';
-    name.textContent = item.name;
-    name.title = item.name;
+    name.textContent = display;
+    name.title = display + (item.uid ? '\nuid: ' + item.uid : '');
 
     var actions = document.createElement('div');
     actions.className = 'actions';
+
+    /* 同平台重名：补一个 uid 徽标，避免两行看起来一模一样 */
+    var uidTag = null;
+    if (item.dup && item.uid) {
+      uidTag = document.createElement('span');
+      uidTag.className = 'uid';
+      uidTag.textContent = '#' + item.uid.slice(-8);
+      uidTag.title = 'uid: ' + item.uid;
+    }
 
     var update = document.createElement('button');
     update.className = 'ghost';
@@ -688,7 +701,7 @@
       /* 阻止冒泡，点更新不会顺带打开预览 */
       update.addEventListener('click', function (event) {
         event.stopPropagation();
-        updateBlogger(platform, item.name);
+        updateBlogger(platform, item.name, display);
       });
     } else {
       update.disabled = true;
@@ -700,13 +713,14 @@
     remove.title = '';
     remove.addEventListener('click', function (event) {
       event.stopPropagation();
-      deleteBlogger(platform, item.name);
+      deleteBlogger(platform, item.name, display);
     });
 
     actions.appendChild(update);
     actions.appendChild(remove);
 
     row.appendChild(name);
+    if (uidTag) row.appendChild(uidTag);
     row.appendChild(actions);
     return row;
   }
@@ -716,22 +730,22 @@
       '/' + encodeURIComponent(name);
   }
 
-  async function updateBlogger(platform, name) {
+  async function updateBlogger(platform, name, display) {
     try {
       var data = await postJSON(bloggerBase(platform, name) + '/update');
       beginTask(data.task);
-      toast('开始更新 ' + name + '，已下载的作品会自动跳过');
+      toast('开始更新 ' + (display || name) + '，已下载的作品会自动跳过');
     } catch (error) {
       toast(error.message, true);
     }
   }
 
-  async function deleteBlogger(platform, name) {
-    if (!confirm('确定删除 <' + name + '> 及其全部已下载文件？')) return;
+  async function deleteBlogger(platform, name, display) {
+    if (!confirm('确定删除 <' + (display || name) + '> 及其全部已下载文件？')) return;
     try {
       await api(bloggerBase(platform, name), { method: 'DELETE' });
       if (state.galleryPlatform === platform && state.galleryName === name) hideGallery();
-      toast('已删除 ' + name);
+      toast('已删除 ' + (display || name));
       loadBloggers();
     } catch (error) {
       toast(error.message, true);
@@ -753,7 +767,8 @@
       if (platform && group.platform !== platform) return;
       group.items.forEach(function (item) {
         if (item.homepage) {
-          queue.push({ platform: group.platform, name: item.name });
+          queue.push({ platform: group.platform, name: item.name,
+                       label: item.label || item.name });
         }
       });
     });
@@ -792,7 +807,7 @@
     }
     var target = job.queue.shift();
     job.index = job.total - job.queue.length;
-    var title = job.mode === 'scrape' ? target : target.name;
+    var title = job.mode === 'scrape' ? target : (target.label || target.name);
     job.current = title;
     $('logBox').textContent += '\n=== [' + job.index + '/' + job.total + '] ' +
       title + ' ===\n';
@@ -861,6 +876,7 @@
     state.galleryName = '';
     state.galleryPlatform = '';
     state.galleryLabel = '';
+    state.galleryDisplay = '';
     state.galleryKind = 'image';
     state.galleryItems = [];
     state.galleryLoading = false;
@@ -904,9 +920,10 @@
   }
 
   /* 点击博主行：打开预览，每次默认回到图片 */
-  function openGallery(platform, label, name) {
+  function openGallery(platform, label, name, display) {
     state.galleryPlatform = platform;
     state.galleryLabel = label || '';
+    state.galleryDisplay = display || name;
     state.galleryName = name;
     state.galleryKind = 'image';
     state.galleryScroll = { image: 0, video: 0 };
@@ -933,7 +950,7 @@
     if (!state.galleryName || state.galleryLoading) return;
     rememberGalleryScroll();
     posterFailed = {};   /* 之前取帧失败或已缓存的视频允许重新取首帧 */
-    coverSaving = {};    /* 允许重新回存封面（比如 .cache 被手动清掉） */
+    coverSaving = {};    /* 允许重新回存封面（比如 .preview 被手动清掉） */
     fetchGallery();
   }
 
@@ -971,7 +988,8 @@
 
   /* 预览标题：带上平台名，避免不同平台同名博主混淆 */
   function bloggerTitle() {
-    return (state.galleryLabel ? state.galleryLabel + ' · ' : '') + state.galleryName;
+    return (state.galleryLabel ? state.galleryLabel + ' · ' : '') +
+      (state.galleryDisplay || state.galleryName);
   }
 
   /* 媒体 URL 带上文件 mtime 作为版本号：文件被覆盖后不会命中旧缓存 */
@@ -1246,7 +1264,7 @@
     active.forEach(function (cancel) { cancel(); });
   }
 
-  /* 把取到的首帧回存服务端，下次打开直接读 .cache/covers 里的图 */
+  /* 把取到的首帧回存服务端，下次打开直接读 video/.preview 里的图 */
   var coverSaving = {};
 
   function saveCover(relPath, dataUrl) {

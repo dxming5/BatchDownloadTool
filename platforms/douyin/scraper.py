@@ -19,6 +19,9 @@ from core import browser
 
 API_MARK = '/aweme/v1/web/aweme/post/'
 
+# 用户资料接口：博主名、数字 uid、粉丝数都在这里（自己主页是 /self/）
+USER_PROFILE_MARK = '/aweme/v1/web/user/profile/'
+
 # 用户页的作品列表节点随版本变化，按优先级探测
 LIST_SELECTORS = (
     '[data-e2e="user-post-item-list"]',
@@ -186,7 +189,8 @@ def parse_sec_user_id(raw):
 
 
 def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
-                      on_progress=None, should_stop=None, verbose=False):
+                      on_progress=None, should_stop=None, on_profile=None,
+                      verbose=False):
     """
     抓取某博主的主页作品
 
@@ -197,6 +201,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
         since_ts:     只保留 create_time >= since_ts 的作品；连续若干条早于它时提前停止
         on_progress:  进度回调
         should_stop:  取消检查函数，返回 True 时尽快结束（保留已抓部分）
+        on_profile:   主页信息回调：拿到博主资料就立即上报一次（不等抓完）
         verbose:      是否打印到控制台
 
     Returns:
@@ -218,6 +223,8 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     user_url = 'https://www.douyin.com/user/{}'.format(sec_user_id)
     pages = []
     pending = []
+    profile_pending = []
+    author = {}
     awemes = []
     seen_ids = set()
     last_page = {'has_more': 1}
@@ -240,10 +247,64 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
     def cancelled():
         return bool(should_stop and should_stop())
 
+    profile_sent = {'done': False}
+
+    def notify_profile():
+        """主页信息一拿到就上报：编排层据此立即落盘记录文件，不必等抓取结束"""
+        if profile_sent['done'] or not on_profile:
+            return
+        nickname = (author.get('nickname') or '').strip()
+        if not nickname:
+            return
+        profile_sent['done'] = True
+        try:
+            on_profile({'nickname': nickname,
+                        'user_url': user_url,
+                        'user_id': sec_user_id,
+                        'follower_count': _follower_count(author)})
+        except Exception:
+            pass
+
     def on_response(response):
         """只记录目标接口的响应对象，解析留给主循环，避免在回调里做阻塞调用"""
-        if API_MARK in response.url and response.status == 200:
+        if response.status != 200:
+            return
+        if API_MARK in response.url:
             pending.append(response)
+        elif USER_PROFILE_MARK in response.url:
+            profile_pending.append(response)
+
+    def is_target_author(candidate):
+        """该用户对象是否就是目标博主
+
+        同一个资料接口前缀下还有 /profile/self/（当前登录账号）等响应，
+        无脑采用会把作者昵称顶成登录账号的昵称，进而让编排层把目录改名、
+        让下载层把作品全判成「作者不一致」。所以按 sec_uid 校验，只有对
+        不上目标 sec_user_id 的一律丢弃；确实没有标识字段时才先到先用。
+        """
+        if not isinstance(candidate, dict):
+            return False
+        if not (candidate.get('nickname') or '').strip():
+            return False
+        mark = ''
+        for key in ('sec_uid', 'sec_user_id', 'sec_userid'):
+            value = candidate.get(key)
+            if isinstance(value, str) and value.strip():
+                mark = value.strip()
+                break
+        if not mark:
+            return not author          # 无标识：已有作者就不再覆盖
+        return mark == sec_user_id
+
+    def drain_profile():
+        """解析用户资料接口：昵称、数字 uid、粉丝数"""
+        nonlocal author
+        while profile_pending:
+            payload = browser.response_json(profile_pending.pop(0))
+            user = (payload or {}).get('user') if isinstance(payload, dict) else None
+            if is_target_author(user):
+                author = user
+        notify_profile()
 
     def drain():
         """把已抓到的响应解析入队，并按 since_ts 过滤与判断早停"""
@@ -306,6 +367,14 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             emit({'stage': 'scrape', 'pages': 0, 'count': 0,
                   'message': '已打开主页，等待作品列表…'})
 
+            # 用户资料接口与首屏作品接口通常同时到达：先短等一次，
+            # 即使 wait_login=0 也能拿到博主名 / uid / 粉丝数
+            profile_waited = 0
+            while not author and profile_waited < 3000:
+                page.wait_for_timeout(500)
+                profile_waited += 500
+                drain_profile()
+
             # 等待首屏接口数据；期间可人工登录、拖滑块
             waited = 0
             while not pages and waited < wait_login * 1000:
@@ -316,6 +385,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                 page.wait_for_timeout(1000)
                 waited += 1000
                 drain()
+                drain_profile()
                 if waited % 10000 == 0:
                     logged, modal = browser.login_state(
                         page, LOGIN_COOKIE_NAMES, LOGIN_MODAL_SELECTOR)
@@ -353,6 +423,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                             page.wait_for_timeout(1000)
                             waited += 1000
                             drain()
+                            drain_profile()
 
             # 滚动翻页，直到 has_more=0、到达时间边界、连续无新增或被取消
             last_total = len(awemes)
@@ -371,6 +442,7 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
                 info = browser.scroll_step(page, LIST_SELECTORS)
                 page.wait_for_timeout(1000)
                 drain()
+                drain_profile()
                 if len(awemes) > last_total:
                     last_total = len(awemes)
                     idle = 0
@@ -387,11 +459,15 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
             if not stopped and not early_stop and last_page.get('has_more') == 0:
                 stop_reason = 'has_more=0（已到最后一页）'
 
-            nickname = ''
-            for aweme in awemes:
-                nickname = (aweme.get('author') or {}).get('nickname') or ''
-                if nickname:
-                    break
+            # 作者信息优先用资料接口；没命中时退回作品作者，最后用页面标题
+            if not author:
+                for aweme in awemes:
+                    candidate = aweme.get('author') or {}
+                    if is_target_author(candidate):
+                        author = candidate
+                        break
+            notify_profile()
+            nickname = (author.get('nickname') or '').strip()
             if not nickname:
                 try:
                     nickname = page.title().replace(' - 抖音', '').strip()
@@ -416,8 +492,11 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
 
     return {
         'sec_user_id': sec_user_id,
+        'user_id': sec_user_id,          # 记录文件名：与主页链接里的标识一致
+        'uid': str(author.get('uid') or '').strip(),
         'user_url': user_url,
         'nickname': nickname,
+        'follower_count': _follower_count(author),
         'pages': pages,
         'aweme_list': awemes,
         'has_more': last_page.get('has_more'),
@@ -426,6 +505,19 @@ def fetch_user_awemes(sec_user_id, options=None, since_ts=None,
         'since_ts': since_ts,
         'fetch_time': time.strftime('%Y-%m-%d %H:%M:%S'),
     }
+
+
+def _follower_count(source):
+    """粉丝数：资料接口与作品作者通常放在顶层，个别版本放在 stats 里"""
+    for candidate in (source, (source or {}).get('stats') or {}):
+        value = (candidate or {}).get('follower_count')
+        if isinstance(value, bool):
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _pick(payload, key, default=None):

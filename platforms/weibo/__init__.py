@@ -25,18 +25,20 @@ class WeiboPlatform(Platform):
         return bool(value) and value.isdigit() and len(value) >= 5
 
     def parse_target(self, url):
-        """返回规范化的主页地址，写入 homepage.txt 供「更新」复用"""
+        """返回规范化的主页地址，写入 author.json 供「更新」复用"""
         return scraper.home_url(scraper.parse_uid(url))
 
     # ---------------- 抓取 ----------------
 
-    def scrape(self, target, options, on_progress=None, should_stop=None):
+    def scrape(self, target, options, on_progress=None, should_stop=None,
+               on_profile=None):
         return scraper.fetch_user_posts(
             target,
             options=options,
             since_ts=options.get('since_ts'),
             on_progress=on_progress,
             should_stop=should_stop,
+            on_profile=on_profile,
             verbose=False,
         )
 

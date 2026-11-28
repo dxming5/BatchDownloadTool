@@ -37,7 +37,8 @@ class XiaohongshuPlatform(Platform):
 
     # ---------------- 抓取 ----------------
 
-    def scrape(self, target, options, on_progress=None, should_stop=None):
+    def scrape(self, target, options, on_progress=None, should_stop=None,
+               on_profile=None):
         # 已经下载过的笔记不再打开详情页：这里只有小红书自己关心这件事
         return scraper.fetch_user_notes(
             target,
@@ -45,18 +46,18 @@ class XiaohongshuPlatform(Platform):
             since_ts=options.get('since_ts'),
             on_progress=on_progress,
             should_stop=should_stop,
+            on_profile=on_profile,
             known_ids=self.known_ids(target),
             verbose=False,
         )
 
     def known_ids(self, target):
-        """按主页链接反查已有目录，取出已下载的笔记 ID；找不到返回空集"""
+        """按用户 ID 反查已有目录，取出已下载的笔记 ID；找不到返回空集"""
         wanted = _user_id_of(target)
         if not wanted:
             return set()
         for blogger in store.platform_bloggers(self.key):
-            homepage = blogger.read_homepage()
-            if homepage and _user_id_of(homepage) == wanted:
+            if blogger.read_record()['uid'] == wanted:
                 return blogger.read_ids()
         return set()
 

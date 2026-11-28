@@ -26,13 +26,15 @@ class DouyinPlatform(Platform):
 
     # ---------------- 抓取 ----------------
 
-    def scrape(self, target, options, on_progress=None, should_stop=None):
+    def scrape(self, target, options, on_progress=None, should_stop=None,
+               on_profile=None):
         return scraper.fetch_user_awemes(
             target,
             options=options,
             since_ts=options.get('since_ts'),
             on_progress=on_progress,
             should_stop=should_stop,
+            on_profile=on_profile,
             verbose=False,
         )
 
@@ -57,12 +59,6 @@ class DouyinPlatform(Platform):
             should_stop=should_stop,
             verbose=False,
         )
-
-    def user_id_of(self, url):
-        try:
-            return scraper.parse_sec_user_id(url)
-        except ValueError:
-            return ''
 
     def headers(self):
         return assemble.headers()

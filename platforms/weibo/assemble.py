@@ -8,7 +8,7 @@
 downloader 并发执行：
     图片  mblog.pics[].large.url（缺失时回退 bmiddle / thumbnail / url）
           微博图床的无水印版恒为最长边 690，这里固定取原图以保住最高画质
-    视频  page_info 里的一个清晰度地址，落成 {发布时间}.mp4
+    视频  page_info 里的一个清晰度地址，落成 video/{发布时间}.mp4
           视频角标是转码时烧录的，所有直链都带，无法去水印
 类型由 classify 判定：先看视频（视频微博的 pics 只是一张封面）。
 两类都没有的篇（纯文字、头条文章、转发别人内容）跳过并计数提示。
@@ -245,7 +245,10 @@ def collect(result):
             skipped 为「没有可下载内容」的篇数，只用于日志提示；
             dropped_authors 为「作者昵称 -> 篇数」，只用于日志提示
     """
-    expected = safe_name(result.get('nickname') or '')
+    # 昵称基准是本次任务已登记的目标博主；抓取结果里的昵称只作兜底
+    current = store.current()
+    expected = safe_name((current.nickname if current else '')
+                         or result.get('nickname') or '')
 
     entries = []
     dropped = {}

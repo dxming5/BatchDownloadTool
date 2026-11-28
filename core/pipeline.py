@@ -40,27 +40,88 @@ def run(url, month_days, task):
     options = platform.options()
     options['since_ts'] = (int(time.time()) - month_days * 86400) if month_days else None
 
+    # ---------------- 主页信息即刻登记 ----------------
+    # 平台一拿到昵称 / 主页链接 / uid / 粉丝数就回调这里：博主目录与
+    # author.json 立即落盘，不必等抓取结束（中途取消也能留下记录）
+    registered = {'blogger': None, 'record': None, 'created': False}
+
+    def announce(raw_name, blogger, renamed):
+        """改名与登记都走同一种提示：改名或撞名时把实际目录名说出来"""
+        if renamed:
+            task.push({'stage': 'notice',
+                       'message': '博主已改名：{} → {}（按 uid 重命名原目录）'
+                                  .format(renamed[0], renamed[1])})
+        elif blogger.nickname != raw_name:
+            task.push({'stage': 'notice',
+                       'message': '目录名 {} 与已有目录冲突或不可用，实际使用：{}'
+                                  .format(raw_name, blogger.name)})
+        task.push({'stage': 'notice',
+                   'message': '已登记主页信息：{}'.format(blogger.nickname)})
+
+    def register(info):
+        """主页信息回调：只有第一次决定目录名，之后只补记录
+
+        一次任务只允许一次别名修改：目录名以「刚拿到的主页信息」为准，
+        后续回调（平台可能多次上报、抓取结束也可能再回传昵称）不再触发
+        attach，避免同一次任务里目录名被反复改来改去。
+        """
+        info = info or {}
+        folder = safe_name(info.get('nickname') or '') or target
+        if not folder:
+            return
+        uid = (info.get('user_id') or '').strip()
+        record = (folder, info.get('user_url') or '', uid,
+                  info.get('follower_count'))
+        if record == registered['record']:
+            return
+        if registered['blogger'] is not None:
+            # 目录名已定：只刷新记录，昵称沿用目录名里的
+            registered['record'] = record
+            registered['blogger'].save_record(record[1], uid, record[3])
+            return
+        task.set_name(folder)
+        # uid 是博主唯一标识：已有目录按 uid 认领，改名时原地重命名而不是新建
+        blogger, created, renamed = store.attach(platform.key, folder, uid)
+        if not blogger:
+            return
+        registered['created'] = registered['created'] or created
+        blogger.save_record(record[1], uid, record[3], folder)
+        registered['blogger'] = blogger
+        registered['record'] = record
+        announce(folder, blogger, renamed)
+
     # ---------------- 抓取 ----------------
     task.set_phase('scrape')
     result = platform.scrape(target, options,
                              on_progress=task.push,
-                             should_stop=task.stop_flag.is_set)
+                             should_stop=task.stop_flag.is_set,
+                             on_profile=register)
 
     if task.stop_flag.is_set() or result.get('cancelled'):
         task.mark('cancelled', '抓取已取消')
         return
 
     # ---------------- 存储定位 ----------------
-    folder_name = safe_name(result.get('nickname') or '') or target
-    task.set_name(folder_name)
-
-    existed = store.blogger(platform.key, folder_name) is not None
-    blogger = store.ensure(platform.key, folder_name)
+    # 目录名在「拿到主页信息」时就已定下：一次任务只改一次名。这里只兜底——
+    # 主页信息没上报过（拿不到昵称）才用抓取结果里的昵称建目录，不二次改名。
+    blogger = registered['blogger']
+    if blogger is None:
+        folder_name = safe_name(result.get('nickname') or '') or target
+        blogger, created, renamed = store.attach(platform.key, folder_name,
+                                                 result.get('user_id') or '')
+        registered['created'] = registered['created'] or created
+        if blogger:
+            announce(folder_name, blogger, renamed)
     if not blogger:
-        task.mark('error', '博主目录不可用：{}'.format(folder_name))
+        task.mark('error', '博主目录不可用：{}'.format(
+            safe_name(result.get('nickname') or '') or target))
         return
-    # 登记主页链接，之后点「更新」就不用再粘贴
-    blogger.save_homepage(result.get('user_url') or '')
+    task.set_name(blogger.nickname or blogger.name)
+    # 登记 uid / 昵称 / 主页链接 / 粉丝数（author.json），昵称一律用目录名里的，
+    # 不传抓取结果里的昵称，避免旧昵称把刚改好的名字覆盖回去
+    blogger.save_record(result.get('user_url') or '',
+                        result.get('user_id') or '',
+                        result.get('follower_count'))
 
     # ---------------- 下载组装 ----------------
     task.set_phase('download')
@@ -74,9 +135,9 @@ def run(url, month_days, task):
     finally:
         store.clear()
 
-    # 平台一条都没挑出来：撤掉可能刚建的空目录
+    # 平台一条都没挑出来：撤掉本次任务刚建的空目录
     if not stats.get('total'):
-        if not existed:
+        if registered['created']:
             blogger.delete()
         task.mark('error', '没有可下载内容：可能未登录、没有公开作品、已全部下载过，'
                            '或超出所选时间范围')
@@ -89,11 +150,13 @@ def run(url, month_days, task):
 
 
 def mark_downloaded(platform, users):
-    """给关注列表每项标注是否已有下载目录（只读 homepage.txt，不建目录）"""
+    """给关注列表每项标注是否已有下载目录（只读记录文件，不建目录）
+
+    记录文件名就是平台用户 ID（抖音关注列表返回的也是 sec_user_id）。
+    """
     existing = set()
     for blogger in store.platform_bloggers(platform.key):
-        homepage = blogger.read_homepage()
-        uid = platform.user_id_of(homepage) if homepage else ''
+        uid = blogger.read_record()['uid']
         if uid:
             existing.add(uid)
 
@@ -110,7 +173,7 @@ def run_following(platform_key, task):
     抓取「当前登录账号」的关注列表
 
     只产出博主主页链接，交给前端勾选后再走正常抓取下载流程；
-    不创建任何博主目录，也不写 homepage.txt。
+    不创建任何博主目录，也不写记录文件。
     """
     platform = registry.get(platform_key)
     if platform is None or not getattr(platform, 'supports_following', False):

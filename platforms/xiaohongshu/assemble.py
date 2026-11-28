@@ -204,7 +204,10 @@ def collect(result):
             entries 每项自带原始详情与命名需要的字段；
             dropped_authors 为「作者昵称 -> 条数」，只用于日志提示
     """
-    expected = safe_name(result.get('nickname') or '')
+    # 昵称基准是本次任务已登记的目标博主；抓取结果里的昵称只作兜底
+    current = store.current()
+    expected = safe_name((current.nickname if current else '')
+                         or result.get('nickname') or '')
 
     entries = []
     dropped = {}
