@@ -37,9 +37,9 @@
 BatchDownloadTool/
 ├── web_app.py                 # 程序入口（寻找空闲端口、启动 Web 服务并打开浏览器）
 ├── conf/
-│   ├── config.ini             # 统一配置文件（带注释，全部可配置参数）
-│   └── settings.py            # 配置读取（固定读 conf/config.ini，按平台分段）
+│   └── config.ini             # 统一配置文件（带注释，全部可配置参数）
 ├── core/                      # 公用层：与平台无关的机制
+│   ├── settings.py            # 配置读取（固定读 conf/config.ini，按平台分段）
 │   ├── task.py                # 任务状态、进度、日志、失败清单、取消
 │   ├── pipeline.py            # 编排：认平台 → 抓取 → 定位存储 → 交给平台组装
 │   ├── registry.py            # 平台注册表（key / 显示名 / 链接识别）
@@ -73,8 +73,6 @@ BatchDownloadTool/
 │   ├── douyin/                # 抖音的浏览器数据目录
 │   ├── xiaohongshu/           # 小红书的浏览器数据目录
 │   └── weibo/                 # 微博的浏览器数据目录（新增平台同样在下面建目录）
-├── scripts/
-│   └── migrate_layout.py      # 旧目录布局迁移（{博主名}/{uid}.json → {昵称} uid={uid}/author.json）
 ├── requirements.txt           # 依赖清单
 └── README.md                  # 说明文档
 ```
@@ -111,7 +109,6 @@ BatchDownloadTool/
 - 目录结构只由 `core/paths.py` 计算与提供：博主目录、视频目录、图片目录、预览图目录、临时与最终落盘路径、「这是不是预览图」的判定都由它给出，其它模块不拼目录、不接收目录参数
 - 把已有的博主目录整个拷进对应平台目录，重启后界面即可识别并预览（目录名缺 ` uid=<uid>` 或没有 `author.json` 时「更新」按钮不可用）
 - 每个博主目录只有一份记录文件 `author.json`，内容为 `{"uid": 平台用户 ID, "nickname": 昵称, "url": 主页链接, "fans": 粉丝数}`
-- 旧布局（`{博主名}/{uid}.json`）已废弃，先跑一次 `python scripts/migrate_layout.py --apply` 迁移：目录改名为 `{昵称} uid={uid}`、记录改名为 `author.json`，旧记录自动备份到 `{download_dir}/.migration_backup/`
 - 从旧版本升级：把 `download_dir` 的末尾去掉一级平台目录即可（例如原来填 `F:/图片/douyin/`，改为 `F:/图片/`），原有博主目录会直接成为平台目录，无需移动文件
 
 ## 快速开始
@@ -308,7 +305,7 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | 模块 | 职责 |
 |---|---|
 | `web_app.py` | 程序入口：寻找空闲端口、启动 Flask、自动打开浏览器 |
-| `conf/settings.py` | 配置读取（固定读 `conf/config.ini`，按平台分段并合并默认值） |
+| `core/settings.py` | 配置读取（固定读 `conf/config.ini`，按平台分段并合并默认值） |
 | `core/task.py` | 任务状态、进度、日志、失败清单、取消、快照；百分比按 `done/total` 换算 |
 | `core/pipeline.py` | 编排：认平台 → 抓取 → 定位存储 → `platform.assemble()`；关注列表走独立的 `run_following()` |
 | `core/registry.py` | 平台注册表（key、显示名、链接识别） |
@@ -418,7 +415,6 @@ playwright install chromium      # 一键抓取需要，下载浏览器内核
 | 提示「没有可下载内容」 | 已全部下载过、未登录、所选时间范围内无作品，或该主页没有公开作品 |
 | 博主列表看不到某个目录 | 博主需位于 `{download_dir}/{平台 key}/` 下，且含 `author.json`、`video/` 或 `picture/` |
 | 「更新」提示缺少记录文件 | 目录里没有 `author.json`：重新粘贴一次主页链接抓取即可生成 |
-| 升级后博主列表为空 | 旧布局（`{博主名}/{uid}.json`）已废弃：先跑 `python scripts/migrate_layout.py`（预演）确认，再加 `--apply` 执行迁移 |
 | 升级后旧目录不见了 | 把 `download_dir` 末尾的平台目录去掉一级（如 `F:/图片/douyin/` → `F:/图片/`） |
 | 预览缩略图异常 | 删除博主目录下 `video/.preview/`、`picture/.preview/` 后刷新，预览图会自动重建 |
 

@@ -14,8 +14,7 @@ import json
 import re
 import time
 
-from conf import settings
-from core import browser
+from core import browser, settings
 
 API_MARK = '/aweme/v1/web/aweme/post/'
 

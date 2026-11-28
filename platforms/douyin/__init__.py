@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """抖音平台实现：抓取 + 下载组装"""
 
-from conf import settings
+from core import settings
 from platforms.base import Platform
 from platforms.douyin import assemble, scraper
 

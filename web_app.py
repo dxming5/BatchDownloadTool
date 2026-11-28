@@ -11,7 +11,7 @@ import socket
 import threading
 import webbrowser
 
-from conf import settings
+from core import settings
 from core.utils import configure_encoding
 
 

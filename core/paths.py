@@ -28,7 +28,7 @@
 
 import os
 
-from conf import settings
+from core import settings
 from core.utils import make_dir, safe_name
 
 

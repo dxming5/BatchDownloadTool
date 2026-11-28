@@ -25,8 +25,7 @@ from datetime import datetime
 from urllib import request
 from urllib.parse import urlparse
 
-from conf import settings
-from core import store
+from core import settings, store
 
 # ---------------- 扩展名 ----------------
 

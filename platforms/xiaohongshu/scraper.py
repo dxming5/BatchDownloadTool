@@ -18,8 +18,7 @@ import json
 import re
 import time
 
-from conf import settings
-from core import browser
+from core import browser, settings
 from core.utils import safe_name
 
 LIST_MARK = '/api/sns/web/v1/user_posted'   # 主页笔记列表

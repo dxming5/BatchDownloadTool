@@ -7,7 +7,7 @@
     抓取结果      平台自定结构，原样交回平台自己解析与下载
 """
 
-from conf import settings
+from core import settings
 
 
 class Platform(object):

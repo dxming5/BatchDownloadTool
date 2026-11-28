@@ -24,8 +24,7 @@ import random
 import re
 import time
 
-from conf import settings
-from core import browser
+from core import browser, settings
 from core.utils import safe_name
 
 API = 'https://m.weibo.cn/api/container/getIndex'

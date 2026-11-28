@@ -21,8 +21,7 @@ from flask import Flask, Response, jsonify, request
 from markupsafe import escape
 
 import platforms  # noqa: F401  导入即注册平台
-from conf import settings
-from core import paths, registry, store
+from core import paths, registry, settings, store
 from core.pipeline import run as run_pipeline, run_following
 from core.task import Task
 from core.utils import make_dir

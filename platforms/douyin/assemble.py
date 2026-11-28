@@ -11,8 +11,7 @@
 
 import os
 
-from conf import settings
-from core import downloader, store
+from core import downloader, settings, store
 from core.utils import safe_name
 
 KEY = 'douyin'

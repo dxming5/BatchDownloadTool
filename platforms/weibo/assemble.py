@@ -21,8 +21,7 @@ aweme_id.txt，任一失败则整篇不记录，下次整篇重下。
 
 import os
 
-from conf import settings
-from core import downloader, store
+from core import downloader, settings, store
 from core.utils import safe_name
 from platforms.weibo import scraper
 

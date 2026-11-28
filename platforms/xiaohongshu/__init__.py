@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """小红书平台实现：抓取 + 下载组装"""
 
-from conf import settings
-from core import store
+from core import settings, store
 from platforms.base import Platform
 from platforms.xiaohongshu import assemble, scraper
 
